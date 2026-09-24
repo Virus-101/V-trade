@@ -1,0 +1,12 @@
+ccxt>=4.3
+joblib>=1.3
+numpy>=1.26
+pandas>=2.1
+python-dotenv>=1.0
+pyyaml>=6.0
+rich>=13.0
+scikit-learn>=1.4
+# Optional: Claude trade reviewer (llm.enabled: true in config.yaml)
+anthropic>=1.0
+# Tests
+pytest>=8.0

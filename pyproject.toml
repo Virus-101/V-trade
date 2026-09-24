@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vtrade"
+version = "0.1.0"
+description = "AI crypto trading bot: ML signals, walk-forward backtests, risk controls, paper and live trading."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ccxt>=4.3",
+    "joblib>=1.3",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "scikit-learn>=1.4",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+vtrade = "vtrade.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["vtrade*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
