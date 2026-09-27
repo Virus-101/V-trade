@@ -47,11 +47,34 @@ candles (ccxt) ─► 25 features ─► gradient-boosted model ─► P(up) ─
 
 ## Quick start (Windows)
 
+Double-click **`run.bat`**. The first time, it creates a virtual environment and installs the
+dependencies. Then it opens the dashboard at http://127.0.0.1:8766, where everything happens:
+
+| Page | What it's for |
+|---|---|
+| **Dashboard** | Live price, the model's current P(up) and decision, the order it would place, paper account, open position, risk status, recent activity |
+| **How it works** | A six-step walkthrough of one decision using live data and real backtest trades |
+| **Paper trading** | Start/stop the paper engine, reset the account, account value chart, open position, trades, Claude reviews, live log |
+| **Backtest** | Run the walk-forward backtest (with or without the kill switch), metrics against buy & hold, account value chart, why trades ended, every trade |
+| **Model & data** | Update candles, retrain the model (optionally measuring out-of-sample accuracy first), task progress |
+| **Settings** | Everything in `config.yaml`, the Claude reviewer's status, and how to go live |
+
+On a fresh install the dashboard walks you through the setup: **download candles**, then
+**train model**. After that the signal appears and you can start paper trading.
+
+The dashboard only listens on your own computer (127.0.0.1). Live trading with real money is
+deliberately not a button there; it stays in the terminal (see below).
+
+### Terminal
+
+Every dashboard action is also a command:
+
 ```powershell
 cd D:\V-trade
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 
+.venv\Scripts\python -m vtrade dashboard  # the web dashboard (what run.bat starts)
 .venv\Scripts\python -m vtrade fetch      # download ~5 years of BTC/USDT 1h candles (public API, no keys)
 .venv\Scripts\python -m vtrade backtest   # walk-forward backtest vs buy & hold
 .venv\Scripts\python -m vtrade train      # train the model used for trading
@@ -60,8 +83,7 @@ python -m venv .venv
 .venv\Scripts\python -m vtrade status     # account, open position, recent fills
 ```
 
-`run.bat` sets up the virtual environment the first time you run it and then starts paper trading.
-You can also pass it any command, for example `run.bat backtest`.
+`run.bat` also passes commands through, for example `run.bat backtest`.
 
 To try it without a network connection, use `backtest --synthetic` or `train --synthetic`. These run
 on generated prices, so they test the code, not the strategy.
@@ -70,9 +92,10 @@ on generated prices, so they test the code, not the strategy.
 
 | Command | What it does |
 |---|---|
+| `dashboard [--port 8766] [--no-browser]` | Start the web dashboard and open it in your browser. |
 | `fetch [--since 2021-01-01]` | Download candles into `data/`. Later runs only download what's new. |
 | `train [--no-eval] [--synthetic]` | Report walk-forward AUC, then fit on all history and save to `models/`. |
-| `backtest [--no-kill-switch] [--synthetic]` | Out-of-sample backtest. Writes trades and equity CSVs to `reports/`. |
+| `backtest [--no-kill-switch] [--synthetic]` | Out-of-sample backtest. Writes trades, equity and a summary to `reports/`. |
 | `signal` | Show the model's current P(up) and what the strategy would do with it. |
 | `paper [--reset] [--reset-halt]` | Paper trading on live prices with a simulated `starting_equity` account. |
 | `live [--yes] [--reset-halt]` | Real orders. Needs keys in `.env`, and you type `LIVE` to confirm. |
@@ -155,7 +178,10 @@ vtrade/
   engine.py       paper/live loop, state persistence
   llm.py          Claude trade reviewer
   journal.py      SQLite journal
+  services.py     fetch / train / backtest / live snapshot, shared by the CLI and the dashboard
   broker/         paper simulator and ccxt exchange broker
+  web/server.py   dashboard API (FastAPI), paper engine thread, background tasks
+  web/static/     dashboard page (HTML, CSS, JS with Chart.js)
 tests/            pytest suite (no network needed)
 ```
 

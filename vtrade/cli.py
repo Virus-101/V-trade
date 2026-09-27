@@ -8,7 +8,6 @@ import math
 import sys
 import time
 
-import pandas as pd
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -39,37 +38,15 @@ def setup_logging(cfg: Config, verbose: bool) -> None:
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-# ---------------------------------------------------------------------------- data helpers
-def load_market_data(cfg: Config, synthetic: bool) -> pd.DataFrame:
-    from vtrade.data import load_cached, synthetic_ohlcv
+# ---------------------------------------------------------------------------- helpers
+def progress_status(label: str):
+    """A rich status spinner plus a callback that shows walk-forward progress in it."""
+    status = console.status(label)
 
-    if synthetic:
-        console.print("[yellow]Using synthetic data (offline demo) - results say nothing about real markets.[/]")
-        return synthetic_ohlcv(n=12_000, timeframe=cfg.timeframe)
-    return load_cached(cfg)
+    def update(done: int, total: int) -> None:
+        status.update(f"{label} {done}/{total} models")
 
-
-def prepare(cfg: Config, df: pd.DataFrame):
-    from vtrade.features import build_features, build_labels
-
-    features = build_features(df)
-    labels = build_labels(df["close"], cfg.model.horizon, cfg.model.label_threshold)
-    return features, labels
-
-
-def walk_forward(cfg: Config, features, labels):
-    from vtrade.model import walk_forward_predict
-
-    n_blocks = math.ceil((len(features) - cfg.model.min_train_bars) / cfg.model.retrain_every)
-    with console.status(f"Walk-forward: training {n_blocks} models on expanding windows..."):
-        return walk_forward_predict(
-            features,
-            labels,
-            horizon=cfg.model.horizon,
-            min_train_bars=cfg.model.min_train_bars,
-            retrain_every=cfg.model.retrain_every,
-            params=cfg.model.params,
-        )
+    return status, update
 
 
 def fmt(key: str, value) -> str:
@@ -95,47 +72,38 @@ def cmd_fetch(cfg: Config, args) -> int:
 
 
 def cmd_train(cfg: Config, args) -> int:
-    from vtrade.model import classification_report, train_final_model
+    from vtrade import services
 
-    df = load_market_data(cfg, args.synthetic)
-    features, labels = prepare(cfg, df)
-    console.print(f"{len(df):,} bars  {df.index[0]} -> {df.index[-1]}")
-
-    if not args.no_eval:
-        probs = walk_forward(cfg, features, labels)
-        report = classification_report(probs, labels)
+    if args.synthetic:
+        console.print("[yellow]Using synthetic data (offline demo) - results say nothing about real markets.[/]")
+    status, update = progress_status("Walk-forward evaluation:")
+    with status:
+        out = services.train(cfg, evaluate=not args.no_eval, synthetic=args.synthetic, on_progress=update)
+    console.print(f"{out['bars']:,} bars  {out['start']} -> {out['end']}")
+    if out["report"]:
         table = Table(title="Out-of-sample (walk-forward) prediction quality")
         table.add_column("metric")
         table.add_column("value", justify="right")
-        for k, v in report.items():
+        for k, v in out["report"].items():
             table.add_row(k, fmt(k, v))
         console.print(table)
-        auc = report.get("auc", 0.5)
-        if auc < 0.52:
+        if out["report"].get("auc", 0.5) < 0.52:
             console.print("[yellow]AUC is close to 0.5: the model has little edge on this data. Be skeptical.[/]")
-
-    meta = {"symbol": cfg.symbol, "timeframe": cfg.timeframe, "exchange": cfg.exchange.id,
-            "horizon": cfg.model.horizon, "label_threshold": cfg.model.label_threshold}
-    model = train_final_model(features, labels, cfg.model.params, meta)
-    if args.synthetic:
-        console.print("[yellow]Synthetic run: model not saved.[/]")
+    if out["saved"]:
+        console.print(f"[green]Model saved[/] to {cfg.model_path} ({out['meta']['train_rows']:,} rows)")
     else:
-        model.save(cfg.model_path)
-        console.print(f"[green]Model saved[/] to {cfg.model_path} ({model.meta['train_rows']:,} rows)")
+        console.print("[yellow]Synthetic run: model not saved.[/]")
     return 0
 
 
 def cmd_backtest(cfg: Config, args) -> int:
-    from vtrade.backtest import run_backtest
-    from vtrade.model import classification_report
+    from vtrade import services
 
-    if args.no_kill_switch:
-        cfg.risk.max_drawdown = 0.99
-    df = load_market_data(cfg, args.synthetic)
-    features, labels = prepare(cfg, df)
-    probs = walk_forward(cfg, features, labels)
-    result = run_backtest(df, features, probs, cfg)
-    report = classification_report(probs, labels)
+    if args.synthetic:
+        console.print("[yellow]Using synthetic data (offline demo) - results say nothing about real markets.[/]")
+    status, update = progress_status("Walk-forward backtest:")
+    with status:
+        result, summary = services.backtest(cfg, ignore_kill_switch=args.no_kill_switch, synthetic=args.synthetic, on_progress=update)
 
     period = f"{result.equity.index[0]:%Y-%m-%d} -> {result.equity.index[-1]:%Y-%m-%d}"
     table = Table(title=f"Walk-forward backtest {cfg.symbol} {cfg.timeframe}  ({period}, out-of-sample only)")
@@ -145,18 +113,13 @@ def cmd_backtest(cfg: Config, args) -> int:
     for k, v in result.metrics.items():
         table.add_row(k, fmt(k, v), fmt(k, result.benchmark_metrics.get(k)))
     table.add_row("final equity", f"{result.equity.iloc[-1]:,.2f}", f"{result.benchmark.iloc[-1]:,.2f}")
-    table.add_row("model AUC", fmt("auc", report.get("auc")), "")
+    table.add_row("model AUC", fmt("auc", summary["model_report"].get("auc")), "")
     console.print(table)
     if result.halted:
         console.print(f"[red]Kill switch fired:[/] {result.halted}")
     console.print("[dim]Includes fees and slippage from config.yaml. Past performance does not predict future results.[/]")
-
     if not args.synthetic:
-        cfg.reports_dir.mkdir(parents=True, exist_ok=True)
-        stem = cfg.reports_dir / cfg.slug
-        result.trades.to_csv(f"{stem}_trades.csv", index=False)
-        pd.concat([result.equity, result.benchmark], axis=1).to_csv(f"{stem}_equity.csv", index_label="timestamp")
-        console.print(f"Saved {stem}_trades.csv and {stem}_equity.csv")
+        console.print(f"Saved trades, equity and summary to {cfg.reports_dir}")
     return 0
 
 
@@ -289,6 +252,22 @@ def cmd_status(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_dashboard(cfg: Config, args) -> int:
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from vtrade.web.server import create_app
+
+    url = f"http://127.0.0.1:{args.port}"
+    console.print(f"V-trade dashboard on [bold]{url}[/] (Ctrl+C to stop)")
+    if not args.no_browser:
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+    uvicorn.run(create_app(cfg), host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vtrade", description="V-trade AI crypto trading bot")
     parser.add_argument("--config", help="path to config.yaml (default: project root)")
@@ -320,6 +299,11 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "live":
             p.add_argument("--yes", action="store_true", help="skip the interactive LIVE confirmation")
         p.set_defaults(func=cmd_paper if name == "paper" else cmd_live)
+
+    p = sub.add_parser("dashboard", help="open the web dashboard (everything in one place)")
+    p.add_argument("--port", type=int, default=8766)
+    p.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
+    p.set_defaults(func=cmd_dashboard)
 
     p = sub.add_parser("status", help="show account, position and recent fills")
     p.add_argument("--mode", choices=["paper", "live"], default="paper")

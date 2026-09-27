@@ -65,6 +65,13 @@ class Journal:
             params=(self.mode, self.symbol, limit),
         )
 
+    def equity_history(self, limit: int = 2000) -> pd.DataFrame:
+        return pd.read_sql_query(
+            "SELECT ts, equity, price, prob FROM (SELECT * FROM equity WHERE mode = ? AND symbol = ? ORDER BY ts DESC LIMIT ?) ORDER BY ts",
+            self.conn,
+            params=(self.mode, self.symbol, limit),
+        )
+
     def recent_events(self, limit: int = 10) -> pd.DataFrame:
         return pd.read_sql_query(
             "SELECT ts, kind, detail FROM events WHERE mode = ? ORDER BY id DESC LIMIT ?",

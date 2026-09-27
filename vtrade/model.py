@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import joblib
 import numpy as np
@@ -74,6 +74,7 @@ def walk_forward_predict(
     min_train_bars: int,
     retrain_every: int,
     params: dict[str, Any],
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> pd.Series:
     """Out-of-sample P(up) for every bar after `min_train_bars`, retraining every `retrain_every` bars.
 
@@ -85,12 +86,15 @@ def walk_forward_predict(
     probs = pd.Series(np.nan, index=features.index)
     if n <= min_train_bars:
         raise ValueError(f"Need more than {min_train_bars} bars for walk-forward, have {n}.")
-    for start in range(min_train_bars, n, retrain_every):
+    starts = range(min_train_bars, n, retrain_every)
+    for done, start in enumerate(starts):
         end = min(start + retrain_every, n)
         train_end = start - horizon + 1  # rows [0, train_end) have labels known at bar `start`
         model = SignalModel(params=params).fit(features.iloc[:train_end], labels.iloc[:train_end])
         probs.iloc[start:end] = model.predict_proba(features.iloc[start:end]).to_numpy()
         log.debug("walk-forward block %s-%s trained on %s rows", start, end, train_end)
+        if on_progress:
+            on_progress(done + 1, len(starts))
     return probs
 
 

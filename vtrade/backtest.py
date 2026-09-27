@@ -81,6 +81,8 @@ def run_backtest(df: pd.DataFrame, features: pd.DataFrame, probs: pd.Series, cfg
                 "fees": pos.entry_fee + exit_fee,
                 "bars_held": pos.bars_held,
                 "exit_reason": reason,
+                "stop": pos.stop,
+                "take_profit": pos.take_profit,
             }
         )
         pos = None

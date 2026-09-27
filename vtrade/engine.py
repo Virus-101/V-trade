@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -246,13 +247,14 @@ class Engine:
         if newest != self.state.last_bar:
             self.on_bar(candles, price, now)
 
-    def run(self) -> None:
+    def run(self, stop: threading.Event | None = None) -> None:
+        """Poll until Ctrl+C, or until `stop` is set (used by the dashboard's background thread)."""
         import ccxt
 
         self.reconcile()
-        log.info("V-trade %s engine started for %s %s (Ctrl+C to stop)", self.mode.upper(), self.cfg.symbol, self.cfg.timeframe)
+        log.info("V-trade %s engine started for %s %s", self.mode.upper(), self.cfg.symbol, self.cfg.timeframe)
         failures = 0
-        while True:
+        while not (stop and stop.is_set()):
             try:
                 self.step()
                 failures = 0
@@ -266,7 +268,11 @@ class Engine:
                 log.exception("Engine step failed (%s in a row): %s", failures, exc)
                 self.journal.event("error", str(exc))
             delay = self.cfg.engine.poll_seconds * min(2 ** max(failures - 1, 0), 8)
-            time.sleep(delay)
+            if stop is not None:
+                stop.wait(delay)
+            else:
+                time.sleep(delay)
+        log.info("V-trade %s engine stopped", self.mode.upper())
 
 
 def review_context(cfg: Config, prob: float, plan, equity: float, features: pd.DataFrame, candles: pd.DataFrame) -> dict[str, Any]:

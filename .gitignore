@@ -17,7 +17,8 @@ models/
 logs/
 reports/
 
-# Editors / OS
+# Editors / OS / local tool config
+.claude/
 .vscode/
 .idea/
 Thumbs.db
