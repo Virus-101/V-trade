@@ -211,3 +211,16 @@ def test_follow_mode_holds_when_leader_data_fails(cfg, ohlcv):
     engine, feed = _with(cfg, ohlcv, FixedModel(0.9), leaders=Broken())
     _two_bars(engine, feed)
     assert engine.state.position is None
+
+
+def test_follow_mode_exits_when_all_leaders_close(cfg, ohlcv):
+    cfg.copy.mode = "follow"
+    leaders = FakeLeaders(0.6)
+    engine, feed = _with(cfg, ohlcv, FixedModel(0.5), leaders=leaders)
+    _two_bars(engine, feed)
+    assert engine.state.position is not None
+    leaders.bias = None  # everyone went flat
+    feed.advance()
+    engine.step(_now_after_close(feed))
+    assert engine.state.position is None
+    assert engine.journal.recent_fills()["reason"].iloc[0] == "leaders closed their positions"

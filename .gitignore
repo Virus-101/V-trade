@@ -18,6 +18,7 @@ logs/
 reports/
 site/
 .netlify/
+node_modules/
 
 # Editors / OS / local tool config
 .claude/

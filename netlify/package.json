@@ -1,0 +1,12 @@
+{
+  "name": "vtrade-netlify",
+  "private": true,
+  "type": "module",
+  "description": "Netlify functions for V-trade's online copy-trading paper account",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

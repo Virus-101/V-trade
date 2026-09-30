@@ -295,9 +295,16 @@ def cmd_publish(cfg: Config, args) -> int:
     if not (ROOT / ".netlify" / "state.json").exists():
         console.print("[red]This folder isn't linked to a Netlify site yet. Run: npx netlify-cli link  (or sites:create)[/]")
         return 2
+    command = [npx, "--yes", "netlify-cli", "deploy", "--no-build", "--dir", str(out), "--prod"]
+    functions = ROOT / "netlify" / "functions"
+    if functions.exists():  # the online copy account (see netlify/)
+        if not (ROOT / "netlify" / "node_modules").exists():
+            npm = shutil.which("npm")
+            subprocess.run([npm, "install", "--no-audit", "--no-fund"], cwd=ROOT / "netlify", check=True)
+        command += ["--functions", str(functions)]
     console.print("Deploying to Netlify...")
     for attempt in range(3):  # netlify-cli sometimes fails transiently with "403 fetching extensions"
-        done = subprocess.run([npx, "--yes", "netlify-cli", "deploy", "--no-build", "--dir", str(out), "--prod"], cwd=ROOT)
+        done = subprocess.run(command, cwd=ROOT)
         if done.returncode == 0:
             return 0
         console.print(f"[yellow]Deploy failed (attempt {attempt + 1}/3), retrying...[/]")

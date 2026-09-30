@@ -50,12 +50,14 @@ def decide(
 
 def decide_follow(cfg: CopyConfig, bias: float | None, in_position: bool) -> Decision:
     """Copy mode: long while the top traders are net long, flat otherwise (spot can't short)."""
+    if in_position:
+        if bias is None and cfg.follow_exit_bias >= 0:
+            return Decision(Action.EXIT, "leaders closed their positions")
+        if bias is not None and bias <= cfg.follow_exit_bias:
+            return Decision(Action.EXIT, f"leaders' bias fell to {bias:+.2f}")
+        return Decision(Action.HOLD, "leaders still net long" if bias is None else f"leaders still net long ({bias:+.2f})")
     if bias is None:
         return Decision(Action.HOLD, "leaders hold no position in this coin")
-    if in_position:
-        if bias <= cfg.follow_exit_bias:
-            return Decision(Action.EXIT, f"leaders' bias fell to {bias:+.2f}")
-        return Decision(Action.HOLD, f"leaders still net long ({bias:+.2f})")
     if bias >= cfg.follow_entry_bias:
         return Decision(Action.ENTER, f"copying leaders, net long {bias:+.2f}")
     return Decision(Action.HOLD, f"leaders' bias {bias:+.2f} below {cfg.follow_entry_bias:+.2f}")

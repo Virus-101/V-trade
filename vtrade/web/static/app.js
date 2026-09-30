@@ -12,6 +12,7 @@ const S = {
   lastJobStatus: null, charts: {},
   news: null, newsError: null, traders: null, tradersError: null, tradersLoading: false,
   newsImpacts: { High: true, Medium: true, Low: false, Holiday: false }, newsCurrency: 'all',
+  live: false, copyAcct: null, copyError: null, copyBusy: false,
 };
 
 const TITLES = { dashboard: 'Dashboard', how: 'How it works', paper: 'Paper trading', news: 'News', traders: 'Top traders', backtest: 'Backtest', model: 'Model & data', settings: 'Settings' };
@@ -80,6 +81,29 @@ async function api(path, method = 'GET', body) {
   return data;
 }
 
+const KEY_NAME = 'vtrade-admin-key';
+function adminKey() { try { return localStorage.getItem(KEY_NAME) || ''; } catch { return ''; } }
+function saveKey(k) { try { k ? localStorage.setItem(KEY_NAME, k) : localStorage.removeItem(KEY_NAME); } catch { /* private mode */ } }
+
+async function liveApi(path, method = 'GET', body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (method !== 'GET') {
+    let key = adminKey();
+    if (!key) {
+      key = (prompt('Admin key for the online copy account (the VTRADE_ADMIN_KEY line in V-trade\'s .env file):') || '').trim();
+      if (!key) throw new Error('No admin key entered');
+      saveKey(key);
+    }
+    headers['X-Admin-Key'] = key;
+  }
+  const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined, cache: 'no-store' });
+  let data = null;
+  try { data = await res.json(); } catch { /* not JSON */ }
+  if (res.status === 401) saveKey('');
+  if (!res.ok) throw new Error((data && data.detail) || `${res.status} ${res.statusText}`);
+  return data;
+}
+
 function toast(message, bad = false) {
   const el = document.createElement('div');
   el.className = 'toast' + (bad ? ' bad' : '');
@@ -119,7 +143,8 @@ function chart(id, labels, datasets, opts = {}) {
       y: { min: opts.yMin, max: opts.yMax, grid: { color: P.grid }, border: { display: false }, ticks: { color: P.gray, font: { size: 11 }, maxTicksLimit: 6, callback: (v) => yFmt(v) } },
     },
   };
-  const existing = S.charts[id];
+  let existing = S.charts[id];
+  if (existing && existing.canvas !== el) { existing.destroy(); delete S.charts[id]; existing = null; }
   if (existing) {
     existing.data.labels = labels;
     existing.data.datasets = datasets;
@@ -219,6 +244,10 @@ function renderDashboard() {
       ? kpi('<a href="#news">News</a>', '<span class="down">Blackout</span>', `${esc(nw.blackout.currency)} ${esc(nw.blackout.title)} · ${dayTime(nw.blackout.time)}`)
       : nw.next ? kpi('<a href="#news">Next big news</a>', until(nw.next.time).replace('in ', ''), `${esc(nw.next.currency)} ${esc(nw.next.title)} · ${dayTime(nw.next.time)}`)
         : kpi('<a href="#news">Next big news</a>', 'None', 'no matching events left this week'));
+  }
+  if (S.live && S.copyAcct) {
+    const c = S.copyAcct;
+    kpis.push(kpi('<a href="#traders">Online copy account</a>', money(c.equity, 2), `<span class="${tone(c.equity - c.starting_equity)}">${pct(c.equity / c.starting_equity - 1, 2)}</span> · ${c.running ? 'copying now' : 'stopped'}`));
   }
   const tr = S.traders;
   if (cfg.copy.enabled) {
@@ -671,10 +700,52 @@ function renderTraders() {
       <td>${side} ${held ? num(Math.abs(r.size), 3) : ''}</td><td class="num">${held ? compact(r.notional) : ''}</td><td class="num">${held && r.entry ? money(r.entry) : ''}</td><td class="num">${held && r.leverage ? `${r.leverage}×` : ''}</td>
       <td class="num ${tone(r.unrealized_pnl)}">${held ? compact(r.unrealized_pnl) : ''}</td><td class="num">${held && r.liquidation ? money(r.liquidation) : ''}</td><td class="num">${r.open_positions ?? ''}</td></tr>`;
   }).join('');
-  html('traders-body', `<div class="grid kpis">${kpis.join('')}</div>${modeCard}
+  html('traders-body', `<div class="grid kpis">${kpis.join('')}</div>${S.live ? copyCard() : modeCard}
     <div class="card"><div class="card-head"><div><h2>Leaders</h2><p class="hint">Click a wallet to see all its trades on Hyperliquid</p></div></div>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Wallet</th><th class="num">Month P&amp;L</th><th class="num">All-time</th><th class="num">Account</th><th>${esc(t.coin)} position</th><th class="num">Size ($)</th><th class="num">Entry</th><th class="num">Leverage</th><th class="num">Unrealized</th><th class="num">Liquidation</th><th class="num">Open positions</th></tr></thead><tbody>${rows}</tbody></table></div>
     <p class="note">To follow specific traders (for example ones you like on Invo), put their 0x wallet addresses in <code>copy.leaders</code> in config.yaml.</p></div>`);
+  if (S.live && S.copyAcct && S.copyAcct.equity_history.length) {
+    const h = S.copyAcct.equity_history;
+    chart('c-copy-equity', h.map((x) => candleLabel(x.t)), [lineDs('Account value', h.map((x) => x.equity), palette().accent, { tension: 0 })], { y: (v) => money(v) });
+  }
+}
+
+function copyCard() {
+  const c = S.copyAcct;
+  if (!c) return `<div class="card" style="margin-bottom:14px">${empty(S.copyError ? `Online copy account unavailable: ${esc(S.copyError)}` : 'Loading the online copy account…')}</div>`;
+  const start = c.starting_equity, r = c.rules;
+  const busy = S.copyBusy ? 'disabled' : '';
+  const buttons = c.running
+    ? `<button class="btn" data-action="live-copy" data-op="check" ${busy}>Check now</button><button class="btn" data-action="live-copy" data-op="stop" ${busy}>Stop</button>`
+    : `<button class="btn primary" data-action="live-copy" data-op="start" ${busy}>Start copying</button><button class="btn danger" data-action="live-copy" data-op="reset" ${busy}>Reset</button>`;
+  const status = c.running
+    ? `<span class="badge good"><span class="dot pulse"></span>Copying</span> since ${when(c.started_at)} · last check ${ago(c.last_run) || 'pending'}`
+    : '<span class="badge">Stopped</span>';
+  const p = c.position;
+  const position = p ? kv([
+    ['Holding', `${num(p.qty, 5)} ${esc(r.coin)} · ${money(p.qty * c.last_price)}`], ['Bought at', `${money(p.entry_price, 2)} · ${when(p.entry_time)}`],
+    ['Stop-loss / target', `${money(p.stop)} / ${money(p.take_profit)}`], ['Unrealized P&L', `<span class="${tone(p.unrealized_pnl)}">${signedMoney(p.unrealized_pnl)}</span>`],
+  ]) : `<p class="note" style="margin:0">No position: it buys when the leaders' bias reaches ${biasNum(r.entry_bias)}.</p>`;
+  const trades = c.trades.slice(0, 15).map((t) => `<tr><td>${when(t.ts)}</td><td>${t.side === 'buy' ? '<span class="badge good">Buy</span>' : '<span class="badge bad">Sell</span>'}</td><td class="num">${num(t.qty, 5)}</td><td class="num">${money(t.price, 2)}</td><td class="num ${tone(t.pnl)}">${t.pnl == null ? '' : signedMoney(t.pnl)}</td><td class="muted">${esc(t.reason)}</td></tr>`).join('');
+  const events = c.events.slice(0, 5).map((e) => `<div class="item"><span><span class="badge ${e.kind === 'error' || e.kind === 'halted' ? 'bad' : e.kind === 'blocked' ? 'warn' : ''}">${esc(e.kind)}</span> <span class="muted">${esc(e.detail)}</span></span><span class="when">${when(e.ts)}</span></div>`).join('');
+  return `<div class="card" style="margin-bottom:14px">
+    <div class="card-head"><div><h2>Online copy account</h2><p class="hint">A ${money(start)} paper account running on Netlify. Every ${r.check_every_minutes} minutes it checks these leaders and copies them, even when your computer is off.</p></div><div class="row">${buttons}</div></div>
+    <div class="row" style="margin-bottom:12px">${status}</div>
+    <div class="grid kpis" style="margin-bottom:12px">
+      ${mini('Account value', money(c.equity, 2), `<span class="${tone(c.equity - start)}">${pct(c.equity / start - 1, 2)}</span> since start`)}
+      ${mini('Cash', money(c.cash, 2))}
+      ${mini('Realized P&L', `<span class="${tone(c.realized_pnl)}">${signedMoney(c.realized_pnl)}</span>`)}
+      ${mini('Closed trades', num(c.closed_trades, 0), c.closed_trades ? `${c.wins} winners` : 'none yet')}
+    </div>
+    <p class="note" style="margin:0 0 10px"><b>Last decision:</b> ${esc(c.last_decision)}${c.last_bias != null ? ` · leaders' bias ${biasNum(c.last_bias)}` : ''}. Buys at ${biasNum(r.entry_bias)} or more, sells at ${biasNum(r.exit_bias)} or less, risks ${(r.risk_per_trade * 100).toFixed(0)}% per trade.</p>
+    ${c.halted ? `<div class="banner bad"><p>Kill switch: ${esc(c.halt_reason)}. Reset the account to start over.</p></div>` : ''}
+    ${position}
+    ${c.equity_history.length ? '<div class="chart" style="margin-top:12px"><canvas id="c-copy-equity" role="img" aria-label="Online copy account value over time"></canvas></div>' : ''}
+    ${trades ? `<div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>Time</th><th>Side</th><th class="num">Qty</th><th class="num">Price</th><th class="num">P&amp;L</th><th>Reason</th></tr></thead><tbody>${trades}</tbody></table></div>` : ''}
+    ${events ? `<div class="list" style="margin-top:10px">${events}</div>` : ''}
+    ${c.admin_key_configured ? '' : '<div class="banner warn"><p><b>Controls locked:</b> the admin key is not set on Netlify yet, so Start, Stop and Reset are refused. Add <code>VTRADE_ADMIN_KEY</code> to the environment variables of the Netlify project, then publish again.</p></div>'}
+    <p class="note">Paper money only. Anyone with this link can watch the account; only someone with your admin key can start, stop or reset it. ${adminKey() ? 'Your key is saved in this browser. <a href="#traders" data-action="forget-key">Forget it</a>' : 'The buttons ask for the key once.'}</p>
+  </div>`;
 }
 
 // ------------------------------------------------------------------ settings
@@ -753,6 +824,18 @@ const actions = {
   'how-trade': (el) => { S.howTrade = +el.dataset.i; renderHow(); },
   'toggle-trades': () => { S.allTrades = !S.allTrades; renderBacktest(); },
   'eval-first': (el) => { S.evalFirst = el.checked; },
+  'live-copy': async (el) => {
+    const op = el.dataset.op;
+    if (op === 'reset' && !confirm('Reset the online copy account? Its trades and P&L are cleared.')) return;
+    S.copyBusy = true; renderTraders();
+    try {
+      S.copyAcct = await liveApi('/api/live/copy', 'POST', { action: op });
+      toast({ start: 'Copying started. It checks the leaders every 5 minutes.', stop: 'Copying stopped', check: `Checked: ${S.copyAcct.last_decision}`, reset: 'Copy account reset' }[op]);
+      await refreshTraders();
+    } catch (e) { toast(e.message, true); }
+    S.copyBusy = false; render();
+  },
+  'forget-key': () => { saveKey(''); toast('Admin key removed from this browser'); render(); },
   'news-refresh': async () => { await refreshNews(true); render(); toast(S.newsError ? `Calendar: ${S.newsError}` : 'Calendar updated', !!S.newsError); },
   'traders-refresh': async () => { toast('Updating top traders…'); await refreshTraders(true); render(); },
   'news-impact': (el) => { S.newsImpacts[el.dataset.impact] = el.checked; renderNews(); },
@@ -792,10 +875,19 @@ async function refreshBacktest() { try { S.backtest = await api('/api/backtest')
 async function refreshNews(force = false) {
   try { S.news = await api('/api/news' + (force ? '?refresh=true' : '')); S.newsError = null; } catch (e) { S.newsError = e.message; }
 }
+async function refreshCopy() {
+  try { S.copyAcct = await liveApi('/api/live/copy'); S.copyError = null; S.live = true; }
+  catch (e) { S.copyError = e.message; }
+}
 async function refreshTraders(force = false) {
   if (S.tradersLoading) return;
   S.tradersLoading = true;
-  try { S.traders = await api('/api/traders' + (force ? '?refresh=true' : '')); S.tradersError = S.traders.error || null; }
+  try {
+    if (SNAPSHOT && S.live) {
+      try { S.traders = await liveApi('/api/live/traders'); } catch { S.traders = await api('/api/traders'); }
+    } else S.traders = await api('/api/traders' + (force ? '?refresh=true' : ''));
+    S.tradersError = S.traders.error || null;
+  }
   catch (e) { S.tradersError = e.message; } finally { S.tradersLoading = false; }
 }
 async function refreshPaper() { try { S.paper = await api('/api/paper'); } catch { /* keep last */ } }
@@ -832,9 +924,13 @@ function loop() {
   if (SNAPSHOT) {
     document.body.classList.add('static');
     setView(location.hash.slice(1) || 'dashboard');
-    await Promise.all([tick(), refreshSignal(), refreshPaper(), refreshBacktest(), refreshNews(), refreshTraders()]);
+    await Promise.all([tick(), refreshSignal(), refreshPaper(), refreshBacktest(), refreshNews(), refreshCopy()]);
+    await refreshTraders();  // live leader positions when the Netlify functions are there
     render();
-    setInterval(render, 60000);  // keep "x min ago" labels current; the data itself doesn't change
+    setInterval(async () => {
+      if (S.live) { await refreshCopy(); if (['dashboard', 'traders'].includes(S.view)) await refreshTraders(); }
+      render();
+    }, 30000);
     return;
   }
   setView(location.hash.slice(1) || 'dashboard');

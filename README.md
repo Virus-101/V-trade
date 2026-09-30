@@ -83,6 +83,38 @@ and deploys it with the Netlify CLI (`npx netlify-cli`, logged in to your accoun
 linked to the site in `.netlify/state.json`. The page is public but marked `noindex`, so search
 engines skip it. It contains no keys or local paths.
 
+### Online copy account (runs on Netlify)
+
+The Netlify site also runs a **$10,000 paper account that copies the top traders around the
+clock**, even when your computer is off. It lives in `netlify/` as four JavaScript Netlify
+Functions:
+
+| Function | What it does |
+|---|---|
+| `copy-tick` | Every 5 minutes: reads the leaders' positions, then buys or sells the paper account |
+| `leaders-refresh` | Every 6 hours: re-ranks the Hyperliquid leaderboard |
+| `live-copy` | `/api/live/copy`: the account (public); Start / Stop / Check / Reset need the admin key |
+| `live-traders` | `/api/live/traders`: the leaders' live positions and bias |
+
+It uses the same rules as `copy.mode: follow` in the local app. It buys spot BTC when the
+leaders' bias reaches `follow_entry_bias` and sells at `follow_exit_bias` or when they all close.
+It also keeps ATR stop and target, 1% risk per trade, the daily loss limit, the kill switch and
+the news blackout, and waits an hour after a sale before buying again. State is kept in Netlify
+Blobs. Settings come from `config.yaml` through the published snapshot, so `run.bat publish` keeps
+the online account in sync. It uses paper money only; it never touches an exchange account.
+
+**Admin key (one-time setup).** Anyone with the link can watch the account, but only someone with
+the admin key can start, stop or reset it. A random key was generated into `.env`
+(`VTRADE_ADMIN_KEY`, not committed). Add the same value on Netlify, then publish once more:
+
+1. Netlify → v-trade-dashboard → Project configuration → Environment variables → Add variable:
+   key `VTRADE_ADMIN_KEY`, the value from `.env`, scope Functions.
+2. `run.bat publish`
+3. On the site's Top traders page, press **Start copying** and paste the key when asked. The
+   browser remembers it.
+
+Function tests: `cd netlify && npm install && npm test`.
+
 ### Terminal
 
 Every dashboard action is also a command:
@@ -238,6 +270,7 @@ vtrade/
   web/export.py   read-only static snapshot for Netlify
   web/static/     dashboard page (HTML, CSS, JS with Chart.js)
 tests/            pytest suite (no network needed)
+netlify/          online copy account (Netlify Functions + tests)
 ```
 
 Run the tests with `.venv\Scripts\python -m pytest`.
