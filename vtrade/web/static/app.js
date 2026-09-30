@@ -1,6 +1,8 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
+// Set by `vtrade publish`: the page is a read-only snapshot reading api/*.json files.
+const SNAPSHOT = window.VTRADE_STATIC || null;
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -59,6 +61,14 @@ const tfHours = (tf) => { const n = parseFloat(tf); const u = tf.slice(-1); retu
 
 // ------------------------------------------------------------------ api
 async function api(path, method = 'GET', body) {
+  if (SNAPSHOT) {
+    if (method !== 'GET') throw new Error('This is a read-only snapshot. Trading controls work in the V-trade app on your computer.');
+    const file = path.split('?')[0].replace(/^\/api\//, '').replace(/\//g, '-');
+    const res = await fetch(`/api/${file}.json`, { cache: 'no-cache' });
+    const data = await res.json();
+    if (data && data.unavailable) throw new Error(data.detail || 'Not available in this snapshot');
+    return data;
+  }
   const res = await fetch(path, {
     method,
     headers: { 'Content-Type': 'application/json', 'X-VTrade': '1' },
@@ -165,6 +175,13 @@ function renderChrome() {
 
   let setup = '';
   const busy = job && job.status === 'running';
+  if (SNAPSHOT) {
+    pill.className = 'badge accent';
+    pill.textContent = 'Read-only snapshot';
+    setup = `<div class="banner"><p><b>Snapshot published ${when(SNAPSHOT.generated_at)}</b> (${ago(SNAPSHOT.generated_at)}). Prices, signals and positions are as of then. Paper trading, backtests and every control run in the V-trade app on your computer; run <code>run.bat publish</code> there to update this page.</p></div>`;
+    html('setup', setup);
+    return;
+  }
   if (!o.data.available) {
     setup = `<div class="banner"><p><b>Step 1:</b> download price history (about 5 years of ${esc(o.market.symbol)} candles, ~20 seconds).</p><button class="btn primary" data-action="job" data-kind="fetch" ${busy ? 'disabled' : ''}>Download candles</button></div>`;
   } else if (!o.model.available) {
@@ -520,7 +537,7 @@ function renderBacktest() {
   const trades = bt.trades.slice().reverse();
   const shown = S.allTrades ? trades : trades.slice(0, 25);
   html('bt-body', `
-    ${s.halted ? `<div class="banner warn"><p>The kill switch fired during this backtest: ${esc(s.halted)}. The bot stayed flat afterwards. Tick "Ignore kill switch" to see the whole period.</p></div>` : ''}
+    ${s.halted ? `<div class="banner warn"><p>The kill switch fired during this backtest: ${esc(s.halted)}. The bot stayed flat afterwards.${SNAPSHOT ? '' : ' Tick "Ignore kill switch" to see the whole period.'}</p></div>` : ''}
     <div class="grid kpis">${kpis.join('')}</div>
     <div class="card" style="margin-bottom:14px">
       <div class="card-head"><div><h2>Account value</h2><p class="hint">Weekly, starting from ${money(s.starting_equity)}</p></div></div>
@@ -812,6 +829,14 @@ function loop() {
 }
 
 (async function init() {
+  if (SNAPSHOT) {
+    document.body.classList.add('static');
+    setView(location.hash.slice(1) || 'dashboard');
+    await Promise.all([tick(), refreshSignal(), refreshPaper(), refreshBacktest(), refreshNews(), refreshTraders()]);
+    render();
+    setInterval(render, 60000);  // keep "x min ago" labels current; the data itself doesn't change
+    return;
+  }
   setView(location.hash.slice(1) || 'dashboard');
   await tick();
   if (S.overview?.model?.available) await refreshSignal();

@@ -273,6 +273,37 @@ def cmd_dashboard(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_publish(cfg: Config, args) -> int:
+    import shutil
+    import subprocess
+
+    from vtrade.config import ROOT
+    from vtrade.web.export import export_site
+
+    out = ROOT / args.out
+    with console.status("Building the read-only snapshot (live signal, news, top traders)..."):
+        result = export_site(cfg, out)
+    console.print(f"Snapshot written to {out}")
+    for name, why in result["failed"].items():
+        console.print(f"[yellow]  {name}: {why}[/]")
+    if args.no_deploy:
+        return 0
+    npx = shutil.which("npx")
+    if not npx:
+        console.print("[red]npx not found. Install Node.js, then run: npx netlify-cli deploy --dir site --prod[/]")
+        return 2
+    if not (ROOT / ".netlify" / "state.json").exists():
+        console.print("[red]This folder isn't linked to a Netlify site yet. Run: npx netlify-cli link  (or sites:create)[/]")
+        return 2
+    console.print("Deploying to Netlify...")
+    for attempt in range(3):  # netlify-cli sometimes fails transiently with "403 fetching extensions"
+        done = subprocess.run([npx, "--yes", "netlify-cli", "deploy", "--no-build", "--dir", str(out), "--prod"], cwd=ROOT)
+        if done.returncode == 0:
+            return 0
+        console.print(f"[yellow]Deploy failed (attempt {attempt + 1}/3), retrying...[/]")
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vtrade", description="V-trade AI crypto trading bot")
     parser.add_argument("--config", help="path to config.yaml (default: project root)")
@@ -309,6 +340,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8766)
     p.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     p.set_defaults(func=cmd_dashboard)
+
+    p = sub.add_parser("publish", help="publish a read-only snapshot of the dashboard to Netlify")
+    p.add_argument("--out", default="site", help="folder for the static site (default: site)")
+    p.add_argument("--no-deploy", action="store_true", help="only build the folder, don't deploy")
+    p.set_defaults(func=cmd_publish)
 
     p = sub.add_parser("status", help="show account, position and recent fills")
     p.add_argument("--mode", choices=["paper", "live"], default="paper")

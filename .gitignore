@@ -16,6 +16,8 @@ data/
 models/
 logs/
 reports/
+site/
+.netlify/
 
 # Editors / OS / local tool config
 .claude/

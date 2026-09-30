@@ -181,3 +181,11 @@ tr.hot td { background: var(--bad-bg); }
 .mode label.on { border-color: var(--accent); background: var(--accent-bg); }
 .mode small { display: block; color: var(--ink-3); font-size: 12px; }
 .addr { font-family: var(--mono); font-size: 12.5px; }
+
+/* Read-only snapshot (vtrade publish): hide everything that changes state */
+body.static #refresh, body.static #bt-run, body.static .check:has(#bt-ignore-ks),
+body.static [data-action="job"], body.static [data-action^="paper-"], body.static [data-action="refresh"],
+body.static [data-action="news-refresh"], body.static [data-action="traders-refresh"],
+body.static select[data-action="copy-mode"] { display: none !important; }
+body.static .mode { pointer-events: none; }
+body.static .mode label:not(.on) { opacity: .5; }

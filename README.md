@@ -67,6 +67,22 @@ On a fresh install the dashboard walks you through the setup: **download candles
 The dashboard only listens on your own computer (127.0.0.1). Live trading with real money is
 deliberately not a button there; it stays in the terminal (see below).
 
+### Online snapshot (Netlify)
+
+A read-only copy of the dashboard is published at **https://v-trade-dashboard.netlify.app**.
+Netlify only hosts static files, so it can't run the Python server, the model or the paper
+engine. The online page shows the numbers from the moment it was published, and its trading
+controls are hidden. To update it, run this on your computer:
+
+```powershell
+run.bat publish
+```
+
+That rebuilds the snapshot (live signal, news, top traders, paper account, backtest) into `site/`
+and deploys it with the Netlify CLI (`npx netlify-cli`, logged in to your account). The folder is
+linked to the site in `.netlify/state.json`. The page is public but marked `noindex`, so search
+engines skip it. It contains no keys or local paths.
+
 ### Terminal
 
 Every dashboard action is also a command:
@@ -95,6 +111,7 @@ on generated prices, so they test the code, not the strategy.
 | Command | What it does |
 |---|---|
 | `dashboard [--port 8766] [--no-browser]` | Start the web dashboard and open it in your browser. |
+| `publish [--no-deploy]` | Build a read-only snapshot of the dashboard in `site/` and deploy it to Netlify. |
 | `fetch [--since 2021-01-01]` | Download candles into `data/`. Later runs only download what's new. |
 | `train [--no-eval] [--synthetic]` | Report walk-forward AUC, then fit on all history and save to `models/`. |
 | `backtest [--no-kill-switch] [--synthetic]` | Out-of-sample backtest. Writes trades, equity and a summary to `reports/`. |
@@ -218,6 +235,7 @@ vtrade/
   news.py         ForexFactory economic calendar and the news blackout
   copytrade.py    top Hyperliquid traders, their positions and bias
   web/server.py   dashboard API (FastAPI), paper engine thread, background tasks
+  web/export.py   read-only static snapshot for Netlify
   web/static/     dashboard page (HTML, CSS, JS with Chart.js)
 tests/            pytest suite (no network needed)
 ```
