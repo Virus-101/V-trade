@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from enum import Enum
 
-from vtrade.config import StrategyConfig
+from vtrade.config import CopyConfig, StrategyConfig
 
 
 class Action(str, Enum):
@@ -46,3 +46,16 @@ def decide(
     if cfg.trend_filter and not (dist_ema_200 > 0):
         return Decision(Action.HOLD, f"below EMA200 (p={prob:.2f})")
     return Decision(Action.ENTER, f"model p={prob:.2f}")
+
+
+def decide_follow(cfg: CopyConfig, bias: float | None, in_position: bool) -> Decision:
+    """Copy mode: long while the top traders are net long, flat otherwise (spot can't short)."""
+    if bias is None:
+        return Decision(Action.HOLD, "leaders hold no position in this coin")
+    if in_position:
+        if bias <= cfg.follow_exit_bias:
+            return Decision(Action.EXIT, f"leaders' bias fell to {bias:+.2f}")
+        return Decision(Action.HOLD, f"leaders still net long ({bias:+.2f})")
+    if bias >= cfg.follow_entry_bias:
+        return Decision(Action.ENTER, f"copying leaders, net long {bias:+.2f}")
+    return Decision(Action.HOLD, f"leaders' bias {bias:+.2f} below {cfg.follow_entry_bias:+.2f}")

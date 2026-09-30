@@ -168,3 +168,16 @@ tr:last-child td { border-bottom: 0; }
   main { padding: 18px 16px 40px; }
   .two { grid-template-columns: 1fr; }
 }
+
+select { font: inherit; height: 34px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--panel); color: var(--ink); }
+.bias { position: relative; height: 10px; border-radius: 99px; background: var(--panel-2); margin: 12px 0 4px; }
+.bias .mid { position: absolute; left: 50%; top: -4px; width: 2px; height: 18px; background: var(--ink-3); }
+.bias .fill { position: absolute; top: 0; bottom: 0; border-radius: 99px; }
+.day-row td { background: var(--panel-2); font-weight: 600; color: var(--ink-2); font-size: 12px; }
+tr.dim td { color: var(--ink-3); }
+tr.hot td { background: var(--bad-bg); }
+.mode { display: grid; gap: 8px; margin-top: 10px; }
+.mode label { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.mode label.on { border-color: var(--accent); background: var(--accent-bg); }
+.mode small { display: block; color: var(--ink-3); font-size: 12px; }
+.addr { font-family: var(--mono); font-size: 12.5px; }

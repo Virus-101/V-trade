@@ -50,3 +50,28 @@ llm:
 engine:
   poll_seconds: 30       # how often to check price for stops and for a newly closed bar
   warmup_bars: 900       # candles loaded for feature calculation (max ~1000 per request)
+
+# Economic calendar from ForexFactory (free weekly feed). Big scheduled releases move BTC hard.
+news:
+  enabled: true
+  currencies: [USD]           # BTC reacts most to US releases: CPI, jobs, Fed decisions
+  impacts: [High]             # High | Medium | Low
+  block_before_minutes: 30    # no new entries this long before a matching event...
+  block_after_minutes: 30     # ...or this long after it
+  close_before_event: false   # true = also sell an open position ahead of the event
+  refresh_minutes: 60         # ForexFactory allows 2 downloads per 5 minutes
+
+# Copy top traders: live positions of the most profitable Hyperliquid wallets (the traders
+# copy-trading apps such as Invo follow). Public on-chain data, no account or login needed.
+copy:
+  enabled: true
+  coin: BTC
+  leaders: []                 # empty = pick automatically from the leaderboard, or list 0x wallet addresses
+  top_n: 10                   # how many leaders to watch when picking automatically
+  rank_by: month              # day | week | month | allTime profit
+  min_account_value: 1000000  # ignore wallets smaller than this (USD)
+  mode: "off"                 # "off" | filter (model entries need leaders net long) | follow (copy the leaders)
+  min_bias: 0.0               # filter mode: minimum net long bias (-1 all short ... +1 all long)
+  follow_entry_bias: 0.3      # follow mode: buy when the leaders' bias reaches this
+  follow_exit_bias: 0.0       # follow mode: sell when it drops to this
+  leaderboard_refresh_hours: 6

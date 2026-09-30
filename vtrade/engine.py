@@ -22,13 +22,15 @@ import pandas as pd
 
 from vtrade.broker.base import Broker, Fill
 from vtrade.config import Config
+from vtrade.copytrade import TopTraders
 from vtrade.data import timeframe_seconds
 from vtrade.features import build_features
 from vtrade.journal import Journal
 from vtrade.llm import ClaudeAnalyst
 from vtrade.model import SignalModel
+from vtrade.news import NewsCalendar
 from vtrade.risk import RiskManager
-from vtrade.strategy import Action, decide
+from vtrade.strategy import Action, Decision, decide, decide_follow
 
 log = logging.getLogger(__name__)
 
@@ -85,10 +87,14 @@ class Engine:
         journal: Journal,
         analyst: ClaudeAnalyst | None = None,
         state: EngineState | None = None,
+        news: NewsCalendar | None = None,
+        leaders: TopTraders | None = None,
     ):
         self.cfg, self.mode = cfg, mode
         self.broker, self.feed, self.model = broker, feed, model
         self.journal, self.analyst = journal, analyst
+        self.news, self.leaders = news, leaders
+        self.consensus: dict[str, Any] | None = None
         self.state = state or load_state(cfg, mode) or EngineState(mode, cfg.symbol, cfg.risk.starting_equity)
         if self.state.symbol != cfg.symbol:
             raise ValueError(f"State file is for {self.state.symbol}, config is {cfg.symbol}")
@@ -125,7 +131,22 @@ class Engine:
             self.save()
 
     # ---------------------------------------------------------------- trading actions
-    def _enter(self, price: float, atr: float, prob: float, features: pd.DataFrame, candles: pd.DataFrame) -> None:
+    def _entry_block(self, now: pd.Timestamp) -> str | None:
+        """Reasons outside the model to skip an entry: scheduled news, or top traders not net long."""
+        if self.news is not None:
+            event = self.news.blackout(now)
+            if event is not None:
+                return f"news blackout: {event.currency} {event.title} at {event.time:%a %H:%M} UTC"
+        if self.cfg.copy.mode == "filter":
+            if self.consensus is None:
+                return "top-trader data unavailable"
+            bias = self.consensus.get("bias")
+            if bias is None or bias < self.cfg.copy.min_bias:
+                shown = "no position" if bias is None else f"{bias:+.2f}"
+                return f"top traders not net long enough ({shown}, need {self.cfg.copy.min_bias:+.2f})"
+        return None
+
+    def _enter(self, price: float, atr: float, prob: float, features: pd.DataFrame, candles: pd.DataFrame, reason: str = "") -> None:
         equity = self.equity(price)
         ok, why = self.risk.can_open(equity)
         if not ok:
@@ -138,7 +159,12 @@ class Engine:
             log.info("Entry skipped: position size below minimum or invalid ATR.")
             return
         if self.analyst is not None:
-            review = self.analyst.review(review_context(self.cfg, prob, plan, equity, features, candles))
+            context = review_context(self.cfg, prob, plan, equity, features, candles)
+            if self.news is not None:
+                context["upcoming_news_24h"] = [e.to_dict() for e in self.news.upcoming(hours=24)]
+            if self.consensus is not None:
+                context["top_traders"] = {k: self.consensus.get(k) for k in ("coin", "bias", "longs", "shorts", "flat")}
+            review = self.analyst.review(context)
             self.journal.event(
                 "llm_review",
                 {"approved": review.approved, "confidence": review.confidence, "reasoning": review.reasoning, "error": review.error},
@@ -157,7 +183,7 @@ class Engine:
             stop=stop,
             take_profit=take_profit,
         )
-        self.journal.record_fill(fill, f"entry p={prob:.2f}")
+        self.journal.record_fill(fill, reason or f"entry p={prob:.2f}")
         log.info("BUY %.6f @ %.2f  stop %.2f  target %.2f", fill.qty, fill.price, stop, take_profit)
         self.save()
 
@@ -215,10 +241,26 @@ class Engine:
         # Only act on a bar that just closed. After a restart or outage, a stale bar is logged, not traded.
         max_age = pd.Timedelta(seconds=max(3 * self.cfg.engine.poll_seconds, 180))
         fresh = (now - close_time) <= max_age and not first_bar
-        decision = decide(self.cfg.strategy, prob, trend, pos is not None, pos.bars_held if pos else 0)
+
+        copy_mode = self.cfg.copy.mode
+        if self.leaders is not None and copy_mode != "off":
+            try:
+                self.consensus = self.leaders.consensus()
+                if self.consensus.get("error"):
+                    raise RuntimeError(self.consensus["error"])
+            except Exception as exc:
+                log.warning("Top-trader positions unavailable: %s", exc)
+                self.consensus = None
+        if copy_mode == "follow":
+            decision = (decide_follow(self.cfg.copy, self.consensus.get("bias"), pos is not None)
+                        if self.consensus is not None else Decision(Action.HOLD, "top-trader data unavailable"))
+        else:
+            decision = decide(self.cfg.strategy, prob, trend, pos is not None, pos.bars_held if pos else 0)
+        bias = self.consensus.get("bias") if self.consensus else None
         log.info(
-            "Bar %s close %.2f | P(up)=%.3f | equity %.2f | %s%s",
-            bar_time.strftime("%Y-%m-%d %H:%M"), close, prob, equity, decision.reason,
+            "Bar %s close %.2f | P(up)=%.3f%s | equity %.2f | %s%s",
+            bar_time.strftime("%Y-%m-%d %H:%M"), close, prob,
+            f" | leaders {bias:+.2f}" if bias is not None else "", equity, decision.reason,
             "" if fresh else " | not trading: startup or stale bar",
         )
         if not fresh:
@@ -231,7 +273,12 @@ class Engine:
             log.error("Trading halted: %s", self.risk.state.halt_reason)
             self.journal.event("halted", self.risk.state.halt_reason)
         elif decision.action == Action.ENTER:
-            self._enter(price, atr, prob, features, candles)
+            blocked = self._entry_block(now)
+            if blocked:
+                log.info("Entry blocked: %s", blocked)
+                self.journal.event("blocked", blocked)
+            else:
+                self._enter(price, atr, prob, features, candles, decision.reason)
         elif decision.action == Action.EXIT:
             self._exit(price, decision.reason)
         self.save()
@@ -240,6 +287,10 @@ class Engine:
         now = now or pd.Timestamp.now(tz="UTC")
         price = self.feed.last_price()
         self.check_exits(price)
+        if self.news is not None and self.cfg.news.close_before_event and self.state.position is not None:
+            event = self.news.imminent(now)
+            if event is not None:
+                self._exit(price, f"news ahead: {event.currency} {event.title}")
         candles = self.feed.recent_candles(self.cfg.engine.warmup_bars)
         if candles.empty:
             return

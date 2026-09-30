@@ -148,8 +148,10 @@ def _run_engine(cfg: Config, args, mode: str) -> int:
     from vtrade.data import MarketFeed, make_exchange
     from vtrade.engine import Engine, load_state, state_path
     from vtrade.journal import Journal
+    from vtrade.copytrade import TopTraders
     from vtrade.llm import ClaudeAnalyst
     from vtrade.model import SignalModel
+    from vtrade.news import NewsCalendar
 
     model = SignalModel.load(cfg.model_path)
     if args.reset and state_path(cfg, mode).exists():
@@ -178,14 +180,17 @@ def _run_engine(cfg: Config, args, mode: str) -> int:
         feed = MarketFeed(cfg)
 
     analyst = ClaudeAnalyst(cfg.llm) if cfg.llm.enabled else None
+    news = NewsCalendar(cfg) if cfg.news.enabled else None
+    leaders = TopTraders(cfg) if cfg.copy.enabled and cfg.copy.mode != "off" else None
     journal = Journal(cfg.data_dir / "journal.db", mode, cfg.symbol)
-    engine = Engine(cfg, mode, broker, feed, model, journal, analyst, state=load_state(cfg, mode))
+    engine = Engine(cfg, mode, broker, feed, model, journal, analyst, state=load_state(cfg, mode), news=news, leaders=leaders)
     if args.reset_halt:
         engine.risk.reset_halt()
         engine.save()
         console.print("Kill switch reset.")
     trained = model.meta.get("train_end", "?")
-    console.print(f"Model trained through {trained}. Claude reviewer: {'on' if analyst else 'off'}.")
+    console.print(f"Model trained through {trained}. Claude reviewer: {'on' if analyst else 'off'}. "
+                  f"News blackout: {'on' if news else 'off'}. Copy top traders: {cfg.copy.mode}.")
     try:
         engine.run()
     except KeyboardInterrupt:

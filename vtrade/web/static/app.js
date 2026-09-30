@@ -8,9 +8,18 @@ const S = {
   view: 'dashboard', overview: null, signal: null, signalError: null, backtest: null, paper: null,
   logAfter: 0, logLines: [], howStep: 0, howTrade: 0, allTrades: false, evalFirst: true,
   lastJobStatus: null, charts: {},
+  news: null, newsError: null, traders: null, tradersError: null, tradersLoading: false,
+  newsImpacts: { High: true, Medium: true, Low: false, Holiday: false }, newsCurrency: 'all',
 };
 
-const TITLES = { dashboard: 'Dashboard', how: 'How it works', paper: 'Paper trading', backtest: 'Backtest', model: 'Model & data', settings: 'Settings' };
+const TITLES = { dashboard: 'Dashboard', how: 'How it works', paper: 'Paper trading', news: 'News', traders: 'Top traders', backtest: 'Backtest', model: 'Model & data', settings: 'Settings' };
+const FORTRADE_URL = 'https://pro.fortrade.com';
+const MODE_HELP = {
+  off: 'Trades on the ML model\'s signal alone.',
+  filter: 'Trades on the ML model\'s signal, but only buys while the top traders are net long.',
+  follow: 'Ignores the model: buys when the top traders turn net long, sells when they stop.',
+};
+const MODE_NAME = { off: 'ML model only', filter: 'ML model + top traders', follow: 'Copy top traders' };
 
 // ------------------------------------------------------------------ formatting
 const money = (v, dp = 0) => v == null ? '–' : (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
@@ -29,6 +38,23 @@ const ago = (iso) => {
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return `${Math.round(s / 86400)} d ago`;
 };
+const until = (iso) => {
+  const s = (new Date(iso).getTime() - Date.now()) / 1000;
+  const a = Math.abs(s);
+  const txt = a < 60 ? 'now' : a < 3600 ? `${Math.round(a / 60)} min` : a < 86400 ? `${Math.floor(a / 3600)} h ${Math.round((a % 3600) / 60)} min` : `${Math.floor(a / 86400)} d ${Math.round((a % 86400) / 3600)} h`;
+  return txt === 'now' ? 'now' : s > 0 ? `in ${txt}` : `${txt} ago`;
+};
+const dayTime = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString('en-US', { weekday: 'short' })} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+const impactBadge = (i) => `<span class="badge ${i === 'High' ? 'bad' : i === 'Medium' ? 'warn' : ''}">${esc(i)}</span>`;
+const shortAddr = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+const compact = (v) => v == null ? '–' : (v < 0 ? '−$' : '$') + (Math.abs(v) >= 1e6 ? `${(Math.abs(v) / 1e6).toFixed(1)}M` : Math.abs(v) >= 1e3 ? `${(Math.abs(v) / 1e3).toFixed(0)}k` : Math.abs(v).toFixed(0));
+const biasText = (b) => b == null ? 'no positions' : b > 0.15 ? 'net long' : b < -0.15 ? 'net short' : 'mixed';
+const biasNum = (b) => b == null ? '–' : (b > 0 ? '+' : '') + b.toFixed(2);
+function biasBar(b) {
+  if (b == null) return '<div class="bias"><div class="mid"></div></div>';
+  const w = Math.abs(b) * 50, left = b >= 0 ? 50 : 50 - w;
+  return `<div class="bias"><div class="fill" style="left:${left}%;width:${w}%;background:${b >= 0 ? 'var(--good)' : 'var(--bad)'}"></div><div class="mid"></div></div><div class="meter-labels"><span>all short</span><span>neutral</span><span>all long</span></div>`;
+}
 const tfHours = (tf) => { const n = parseFloat(tf); const u = tf.slice(-1); return u === 'm' ? n / 60 : u === 'h' ? n : u === 'd' ? n * 24 : n * 168; };
 
 // ------------------------------------------------------------------ api
@@ -170,6 +196,19 @@ function renderDashboard() {
   kpis.push(risk?.halted
     ? kpi('Risk', '<span class="down">Halted</span>', esc(risk.halt_reason))
     : kpi('Risk', '<span class="up">OK</span>', `stop at −${(cfg.risk.max_drawdown * 100).toFixed(0)}% drawdown · ${(cfg.risk.risk_per_trade * 100).toFixed(0)}% per trade`));
+  const nw = o.news || {};
+  if (nw.enabled) {
+    kpis.push(nw.blackout
+      ? kpi('<a href="#news">News</a>', '<span class="down">Blackout</span>', `${esc(nw.blackout.currency)} ${esc(nw.blackout.title)} · ${dayTime(nw.blackout.time)}`)
+      : nw.next ? kpi('<a href="#news">Next big news</a>', until(nw.next.time).replace('in ', ''), `${esc(nw.next.currency)} ${esc(nw.next.title)} · ${dayTime(nw.next.time)}`)
+        : kpi('<a href="#news">Next big news</a>', 'None', 'no matching events left this week'));
+  }
+  const tr = S.traders;
+  if (cfg.copy.enabled) {
+    kpis.push(tr && !tr.error
+      ? kpi(`<a href="#traders">Top traders on ${esc(tr.coin)}</a>`, `<span class="${tone(tr.bias)}">${biasNum(tr.bias)}</span>`, `${tr.longs} long · ${tr.shorts} short · ${tr.flat} flat`)
+      : kpi('<a href="#traders">Top traders</a>', '…', S.tradersError ? esc(S.tradersError) : 'loading positions'));
+  }
   html('dash-kpis', kpis.join(''));
 
   if (sig) {
@@ -203,7 +242,12 @@ function renderDashboard() {
         ['Loss if the stop is hit', `${money(plan.loss_at_stop, 2)} + fees`],
       ]);
     }
+    const gates = [];
+    if (nw.enabled) gates.push(nw.blackout ? `<span class="badge bad">News blackout</span> ${esc(nw.blackout.title)} at ${dayTime(nw.blackout.time)}` : '<span class="badge good">News clear</span> no big release inside the blackout window');
+    if (cfg.copy.enabled && tr && !tr.error) gates.push(`<span class="badge ${tr.bias != null && tr.bias > 0 ? 'good' : 'warn'}">Top traders ${biasText(tr.bias)}</span> bias ${biasNum(tr.bias)} · paper strategy: ${esc(MODE_NAME[o.paper.copy_mode] || '')}`);
+    if (gates.length) dec += `<div class="list" style="margin-top:10px">${gates.map((g) => `<div class="item"><span>${g}</span></div>`).join('')}</div>`;
     dec += `<p class="note">${o.paper.running ? 'Paper trading is running and will act on the next candle close.' : 'Paper trading is stopped, so nothing is traded. <a href="#paper">Start it</a> to act on signals.'}</p>`;
+    if (plan) dec += `<div class="row" style="margin-top:12px"><a class="btn" href="${FORTRADE_URL}" target="_blank" rel="noopener">Practice this on Fortrade ↗</a><span class="muted" style="font-size:12.5px">Fortrade has no API, so place it by hand: buy BTC/USD, stop ${money(plan.stop)}, target ${money(plan.take_profit)}.</span></div>`;
   }
   html('dash-decision', dec);
 
@@ -375,7 +419,12 @@ function renderPaper() {
     ? '<button class="btn" data-action="paper-stop">Stop</button>'
     : `<button class="btn primary" data-action="paper-start" ${o.model.available ? '' : 'disabled title="Train a model first"'}>Start paper trading</button><button class="btn danger" data-action="paper-reset">Reset account</button>`;
   if (halted && !p.running) controls += '<button class="btn" data-action="paper-reset-halt">Clear kill switch</button>';
-  html('paper-controls', controls);
+  html('paper-controls', modeSelect(o.paper.copy_mode) + controls);
+  if (p.running && o.paper.running_copy_mode && o.paper.running_copy_mode !== o.paper.copy_mode) {
+    $('paper-status-hint').textContent += ' The new strategy applies after you stop and start again.';
+  } else if (p.running && o.paper.running_copy_mode) {
+    $('paper-status-hint').textContent += ` Strategy: ${MODE_NAME[o.paper.running_copy_mode]}.`;
+  }
 
   const wins = p.stats.wins, closed = p.stats.closed_trades;
   html('paper-kpis', [
@@ -534,6 +583,83 @@ function renderModel() {
   html('model-job', jobHtml);
 }
 
+// ------------------------------------------------------------------ strategy selector
+function modeSelect(current) {
+  return `<select data-action="copy-mode" title="Paper trading strategy">${Object.entries(MODE_NAME).map(([v, t]) => `<option value="${v}" ${v === current ? 'selected' : ''}>Strategy: ${t}</option>`).join('')}</select>`;
+}
+
+// ------------------------------------------------------------------ news
+function renderNews() {
+  const n = S.news;
+  if (!n) { html('news-body', `<div class="card">${empty(S.newsError ? `Calendar unavailable: ${esc(S.newsError)}` : 'Loading the calendar…')}</div>`); return; }
+  if (n.enabled === false) { html('news-body', `<div class="card">${empty('The news filter is off (news.enabled in config.yaml).')}</div>`); return; }
+  const st = n.settings;
+  const rule = `Blocks new entries ${st.block_before_minutes} min before and ${st.block_after_minutes} min after <b>${esc(st.impacts.join('/'))}</b>-impact <b>${esc(st.currencies.join(', '))}</b> releases. Selling open positions before them: <b>${st.close_before_event ? 'on' : 'off'}</b>.`;
+  let banner = '';
+  if (n.blackout) banner = `<div class="banner bad"><p><b>Blackout now:</b> ${esc(n.blackout.currency)} ${esc(n.blackout.title)} at ${dayTime(n.blackout.time)}. The bot won't open new trades until the window passes.</p></div>`;
+  else if (n.next) banner = `<div class="banner"><p><b>Next big release ${until(n.next.time)}:</b> ${esc(n.next.currency)} ${esc(n.next.title)} · ${dayTime(n.next.time)} · forecast ${esc(n.next.forecast || '–')}, previous ${esc(n.next.previous || '–')}</p></div>`;
+  const currencies = [...new Set(n.events.map((e) => e.currency))].sort();
+  const filters = `<div class="row" style="margin-bottom:10px">
+      ${['High', 'Medium', 'Low', 'Holiday'].map((i) => `<label class="check"><input type="checkbox" data-action="news-impact" data-impact="${i}" ${S.newsImpacts[i] ? 'checked' : ''}> ${i}</label>`).join('')}
+      <select data-action="news-currency"><option value="all" ${S.newsCurrency === 'all' ? 'selected' : ''}>All currencies</option><option value="relevant" ${S.newsCurrency === 'relevant' ? 'selected' : ''}>Only what the bot watches</option>${currencies.map((c) => `<option value="${c}" ${S.newsCurrency === c ? 'selected' : ''}>${c}</option>`).join('')}</select>
+    </div>`;
+  const now = Date.now();
+  const shown = n.events.filter((e) => (S.newsImpacts[e.impact] ?? true) && (S.newsCurrency === 'all' || (S.newsCurrency === 'relevant' ? e.relevant : e.currency === S.newsCurrency)));
+  let rows = '', lastDay = '';
+  shown.forEach((e) => {
+    const d = new Date(e.time);
+    const day = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+    if (day !== lastDay) { rows += `<tr class="day-row"><td colspan="7">${day}</td></tr>`; lastDay = day; }
+    const past = d.getTime() < now;
+    const hot = n.blackout && n.blackout.time === e.time && n.blackout.title === e.title;
+    rows += `<tr class="${hot ? 'hot' : past ? 'dim' : ''}"><td>${pad2(d.getHours())}:${pad2(d.getMinutes())}</td><td><b>${esc(e.currency)}</b></td><td>${impactBadge(e.impact)}</td><td>${esc(e.title)}${e.relevant ? ' <span class="badge accent">watched</span>' : ''}</td><td class="num">${esc(e.forecast || '')}</td><td class="num">${esc(e.previous || '')}</td><td class="muted">${until(e.time)}</td></tr>`;
+  });
+  html('news-body', `${banner}
+    <div class="card" style="margin-bottom:14px"><p class="note" style="margin:0">${rule} Edit the <code>news:</code> section of <code>config.yaml</code> to change it. The calendar says <i>when</i> a release is due, not what it will say: the actual number only appears after the release.</p>
+      <p class="hint" style="margin:8px 0 0">Updated ${when(n.status.fetched_at)}${n.status.error ? ` · last update failed: ${esc(n.status.error)}` : ''}</p></div>
+    <div class="card">${filters}
+      <div class="table-wrap"><table><thead><tr><th>Time</th><th>Currency</th><th>Impact</th><th>Event</th><th class="num">Forecast</th><th class="num">Previous</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty('No events match these filters.')}</td></tr>`}</tbody></table></div>
+    </div>`);
+}
+
+// ------------------------------------------------------------------ top traders
+function renderTraders() {
+  const t = S.traders, o = S.overview;
+  if (!o) return;
+  if (!o.config.copy.enabled) { html('traders-body', `<div class="card">${empty('Top traders are off (copy.enabled in config.yaml).')}</div>`); return; }
+  if (!t) {
+    html('traders-body', `<div class="card">${empty(S.tradersError ? `Top traders unavailable: ${esc(S.tradersError)}` : 'Loading the Hyperliquid leaderboard (about 40 MB; the first time takes around 20 seconds)…')}</div>`);
+    return;
+  }
+  const period = o.config.copy.rank_by === 'allTime' ? 'of all time' : `this ${o.config.copy.rank_by}`;
+  $('traders-title').textContent = `Top traders on ${t.coin}`;
+  $('traders-hint').textContent = `${t.source === 'manual' ? 'The wallets listed in config.yaml' : `The ${t.traders.length} most profitable active Hyperliquid accounts ${period}`}${t.accounts_ranked ? ` (out of ${num(t.accounts_ranked, 0)})` : ''}: the traders copy-trading apps such as Invo follow. Public on-chain data, updated ${ago(t.updated_at)}.`;
+  const kpis = [
+    kpi("Leaders' bias", `<span class="${tone(t.bias)}">${biasNum(t.bias)}</span>`, biasText(t.bias), biasBar(t.bias)),
+    kpi('Long', `${t.longs}`, `${compact(t.long_notional)} in positions`),
+    kpi('Short', `${t.shorts}`, `${compact(t.short_notional)} in positions`),
+    kpi('No position', `${t.flat}`, t.failed ? `${t.failed} could not be read` : `in ${esc(t.coin)} right now`),
+  ];
+  const mode = o.paper.copy_mode;
+  const extra = { off: '', filter: ` Needs bias ≥ ${o.config.copy.min_bias}.`, follow: ` Buys at bias ≥ ${o.config.copy.follow_entry_bias}, sells at ≤ ${o.config.copy.follow_exit_bias}.` };
+  const modeCard = `<div class="card" style="margin-bottom:14px"><div class="card-head"><div><h2>Use in paper trading</h2><p class="hint">Applies when paper trading starts. Live trading uses <code>copy.mode</code> in config.yaml.</p></div></div>
+    <div class="mode">${Object.entries(MODE_NAME).map(([v, label]) => `<label class="${v === mode ? 'on' : ''}"><input type="radio" name="copy-mode" value="${v}" data-action="copy-mode" ${v === mode ? 'checked' : ''}><span><b>${label}</b><small>${MODE_HELP[v]}${extra[v]}</small></span></label>`).join('')}</div>
+    <p class="note">Leaders often use 10–40× leverage and some positions are hedges. V-trade copies only the direction: it buys spot ${esc(t.coin)} with its own position sizing and stops, never shorts and never uses leverage. None of this can be backtested, because past leader positions aren't available.</p></div>`;
+  const rows = t.traders.map((r, i) => {
+    const side = r.side === 'long' ? '<span class="badge good">Long</span>' : r.side === 'short' ? '<span class="badge bad">Short</span>' : r.side === 'unknown' ? '<span class="badge warn">Error</span>' : '<span class="badge">Flat</span>';
+    const held = r.side === 'long' || r.side === 'short';
+    const pnlM = r.pnl ? r.pnl.month : null, pnlA = r.pnl ? r.pnl.allTime : null;
+    return `<tr><td class="muted">${i + 1}</td><td><a class="addr" href="https://app.hyperliquid.xyz/explorer/address/${esc(r.address)}" target="_blank" rel="noopener">${esc(shortAddr(r.address))}</a>${r.name ? ` <span class="muted">${esc(r.name)}</span>` : ''}</td>
+      <td class="num ${tone(pnlM)}">${compact(pnlM)}</td><td class="num ${tone(pnlA)}">${compact(pnlA)}</td><td class="num">${compact(r.account_value || r.leaderboard_account_value)}</td>
+      <td>${side} ${held ? num(Math.abs(r.size), 3) : ''}</td><td class="num">${held ? compact(r.notional) : ''}</td><td class="num">${held && r.entry ? money(r.entry) : ''}</td><td class="num">${held && r.leverage ? `${r.leverage}×` : ''}</td>
+      <td class="num ${tone(r.unrealized_pnl)}">${held ? compact(r.unrealized_pnl) : ''}</td><td class="num">${held && r.liquidation ? money(r.liquidation) : ''}</td><td class="num">${r.open_positions ?? ''}</td></tr>`;
+  }).join('');
+  html('traders-body', `<div class="grid kpis">${kpis.join('')}</div>${modeCard}
+    <div class="card"><div class="card-head"><div><h2>Leaders</h2><p class="hint">Click a wallet to see all its trades on Hyperliquid</p></div></div>
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>Wallet</th><th class="num">Month P&amp;L</th><th class="num">All-time</th><th class="num">Account</th><th>${esc(t.coin)} position</th><th class="num">Size ($)</th><th class="num">Entry</th><th class="num">Leverage</th><th class="num">Unrealized</th><th class="num">Liquidation</th><th class="num">Open positions</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="note">To follow specific traders (for example ones you like on Invo), put their 0x wallet addresses in <code>copy.leaders</code> in config.yaml.</p></div>`);
+}
+
 // ------------------------------------------------------------------ settings
 function renderSettings() {
   const o = S.overview;
@@ -548,18 +674,21 @@ function renderSettings() {
     ['Costs', [['Fee per fill', pctv(c.costs.fee_rate)], ['Slippage per fill', pctv(c.costs.slippage)]]],
     ['Claude reviewer', [['Enabled', c.llm.enabled ? '<span class="badge good">On</span>' : '<span class="badge">Off</span>'], ['Model', `<code>${esc(c.llm.model)}</code>`], ['API key in .env', o.llm.key_set ? 'Set' : 'Not set'], ['Veto below confidence', c.llm.min_confidence], ['If the API fails', c.llm.on_error === 'veto' ? 'Skip the trade' : 'Trade anyway']]],
     ['Engine', [['Price check every', `${c.engine.poll_seconds} s`], ['Candles loaded for features', c.engine.warmup_bars]]],
+    ['News (ForexFactory)', [['Enabled', c.news.enabled ? 'Yes' : 'No'], ['Watched currencies', c.news.currencies.join(', ')], ['Watched impact', c.news.impacts.join(', ')], ['Block before / after', `${c.news.block_before_minutes} / ${c.news.block_after_minutes} min`], ['Sell before big news', c.news.close_before_event ? 'Yes' : 'No']]],
+    ['Top traders (Hyperliquid)', [['Enabled', c.copy.enabled ? 'Yes' : 'No'], ['Coin', c.copy.coin], ['Leaders', c.copy.leaders.length ? `${c.copy.leaders.length} chosen wallets` : `top ${c.copy.top_n} by ${c.copy.rank_by} profit`], ['Minimum account', money(c.copy.min_account_value)], ['Mode in config.yaml (live)', MODE_NAME[c.copy.mode]], ['Mode for paper trading', MODE_NAME[o.paper.copy_mode]]]],
   ];
   const live = o.live.state;
   html('settings-body', groups.map(([t, rows]) => `<div class="card"><h2>${t}</h2><div style="margin-top:8px">${kv(rows.map(([k, v]) => [esc(k), typeof v === 'string' && v.startsWith('<') ? v : esc(v)]))}</div></div>`).join('')
     + `<div class="card"><h2>Live trading</h2><p class="hint">Real money stays in the terminal on purpose</p>
       <p class="note" style="margin-top:0">Live trading needs exchange API keys in <code>.env</code> and a typed confirmation, so it is not a button here. Paper trade first, then run <code>python -m vtrade live</code> in the project folder.</p>
+      <p class="note"><b>Fortrade</b> (<a href="${FORTRADE_URL}" target="_blank" rel="noopener">pro.fortrade.com</a>) has no public API, so V-trade can't place orders there. The dashboard shows each trade idea with its stop and target so you can practice it on your Fortrade demo account by hand.</p>
       ${live ? kv([['Live account cash', money(live.cash, 2)], ['Live position', live.position ? `${num(live.position.qty, 6)} BTC` : 'Flat'], ['Realized P&L', signedMoney(live.realized_pnl)]]) : '<p class="note">No live trading history.</p>'}</div>`);
 }
 
 // ------------------------------------------------------------------ routing & actions
 function render() {
   renderChrome();
-  ({ dashboard: renderDashboard, how: renderHow, paper: renderPaper, backtest: renderBacktest, model: renderModel, settings: renderSettings }[S.view] || (() => {}))();
+  ({ dashboard: renderDashboard, how: renderHow, paper: renderPaper, news: renderNews, traders: renderTraders, backtest: renderBacktest, model: renderModel, settings: renderSettings }[S.view] || (() => {}))();
 }
 
 function setView(view) {
@@ -572,6 +701,8 @@ function setView(view) {
   if (view === 'backtest' && !S.backtest) refreshBacktest().then(render);
   if (view === 'how' && !S.backtest) refreshBacktest().then(render);
   if (view === 'paper') pollLogs();
+  if (view === 'news' && !S.news) refreshNews().then(render);
+  if (view === 'traders' && !S.traders) refreshTraders().then(render);
   render();
   Object.values(S.charts).forEach((c) => c.resize());
 }
@@ -605,16 +736,27 @@ const actions = {
   'how-trade': (el) => { S.howTrade = +el.dataset.i; renderHow(); },
   'toggle-trades': () => { S.allTrades = !S.allTrades; renderBacktest(); },
   'eval-first': (el) => { S.evalFirst = el.checked; },
+  'news-refresh': async () => { await refreshNews(true); render(); toast(S.newsError ? `Calendar: ${S.newsError}` : 'Calendar updated', !!S.newsError); },
+  'traders-refresh': async () => { toast('Updating top traders…'); await refreshTraders(true); render(); },
+  'news-impact': (el) => { S.newsImpacts[el.dataset.impact] = el.checked; renderNews(); },
+  'news-currency': (el) => { S.newsCurrency = el.value; renderNews(); },
+  'copy-mode': async (el) => {
+    try {
+      const r = await api('/api/paper/settings', 'POST', { copy_mode: el.value });
+      toast(`Paper strategy: ${MODE_NAME[r.copy_mode]}.${r.applies_on_restart ? ' Stop and start paper trading to apply it.' : ''}`);
+      await tick();
+    } catch (e) { toast(e.message, true); }
+  },
 };
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action]');
-  if (!el || el.tagName === 'INPUT') return;
+  if (!el || el.tagName === 'INPUT' || el.tagName === 'SELECT') return;
   const fn = actions[el.dataset.action];
   if (fn) fn(el);
 });
 document.addEventListener('change', (e) => {
-  const el = e.target.closest('input[data-action]');
+  const el = e.target.closest('input[data-action], select[data-action]');
   if (el && actions[el.dataset.action]) actions[el.dataset.action](el);
 });
 $('nav').addEventListener('click', (e) => { const a = e.target.closest('a[data-view]'); if (a) location.hash = a.dataset.view; });
@@ -630,6 +772,15 @@ async function refreshSignal(force = false) {
   catch (e) { S.signalError = e.message; }
 }
 async function refreshBacktest() { try { S.backtest = await api('/api/backtest'); } catch (e) { S.backtest = { available: false }; } }
+async function refreshNews(force = false) {
+  try { S.news = await api('/api/news' + (force ? '?refresh=true' : '')); S.newsError = null; } catch (e) { S.newsError = e.message; }
+}
+async function refreshTraders(force = false) {
+  if (S.tradersLoading) return;
+  S.tradersLoading = true;
+  try { S.traders = await api('/api/traders' + (force ? '?refresh=true' : '')); S.tradersError = S.traders.error || null; }
+  catch (e) { S.tradersError = e.message; } finally { S.tradersLoading = false; }
+}
 async function refreshPaper() { try { S.paper = await api('/api/paper'); } catch { /* keep last */ } }
 
 let ticking = false;
@@ -668,4 +819,7 @@ function loop() {
   render();
   loop();
   setInterval(async () => { if (S.overview?.model?.available) { await refreshSignal(); render(); } }, 60000);
+  refreshTraders().then(render);
+  setInterval(async () => { if (['dashboard', 'traders'].includes(S.view)) { await refreshTraders(); render(); } }, 60000);
+  setInterval(async () => { if (S.view === 'news') { await refreshNews(); render(); } }, 300000);
 })();

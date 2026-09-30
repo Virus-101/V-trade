@@ -54,7 +54,9 @@ dependencies. Then it opens the dashboard at http://127.0.0.1:8766, where everyt
 |---|---|
 | **Dashboard** | Live price, the model's current P(up) and decision, the order it would place, paper account, open position, risk status, recent activity |
 | **How it works** | A six-step walkthrough of one decision using live data and real backtest trades |
-| **Paper trading** | Start/stop the paper engine, reset the account, account value chart, open position, trades, Claude reviews, live log |
+| **Paper trading** | Start/stop the paper engine, pick its strategy (ML model, ML model + top traders, or copy top traders), reset the account, account value chart, open position, trades, Claude reviews, live log |
+| **News** | This week's economic calendar from ForexFactory, the next big release, and whether the news blackout is active |
+| **Top traders** | Live BTC positions of the most profitable Hyperliquid traders (the ones Invo copies), their combined long/short bias, and the copy settings |
 | **Backtest** | Run the walk-forward backtest (with or without the kill switch), metrics against buy & hold, account value chart, why trades ended, every trade |
 | **Model & data** | Update candles, retrain the model (optionally measuring out-of-sample accuracy first), task progress |
 | **Settings** | Everything in `config.yaml`, the Claude reviewer's status, and how to go live |
@@ -104,6 +106,39 @@ on generated prices, so they test the code, not the strategy.
 Every command also accepts `--config path.yaml` and `-v` for debug logging. Logs go to
 `logs/vtrade.log`. Fills, equity snapshots, Claude reviews and errors are recorded in
 `data/journal.db` (SQLite).
+
+## News, top traders and Fortrade
+
+**ForexFactory (news blackout).** The bot downloads this week's economic calendar from
+ForexFactory's free export (at most once an hour; ForexFactory allows 2 downloads per 5 minutes).
+By default it opens no new trades from 30 minutes before to 30 minutes after a High-impact USD
+release (CPI, jobs report, Fed decisions), and can also sell ahead of them
+(`news.close_before_event`). The calendar tells the bot *when* a release is due. It can't know
+the actual number before it comes out, and there's no history to backtest this rule with. The
+upcoming releases are also passed to the Claude reviewer when it's on.
+
+**Invo / top traders (copy trading).** Invo (app.invoapp.com) lets people copy traders on
+Hyperliquid, a crypto futures exchange where every account's positions are public. V-trade reads
+the same data from Hyperliquid's public API, so it needs no Invo account, login or private API. It
+watches the 10 most profitable active accounts this month (or the wallets you list in
+`copy.leaders`), and combines their BTC positions into a bias from −1 (all short) to +1 (all long).
+There are three strategies. Pick one on the Paper trading or Top traders page, or set `copy.mode`:
+
+| Mode | What the bot does |
+|---|---|
+| `off` | ML model only (default) |
+| `filter` | ML model entries, but only while the top traders are net long |
+| `follow` | Copies the top traders: buys when their bias reaches `follow_entry_bias`, sells at `follow_exit_bias` |
+
+The leaders often use 10–40× leverage, and some of their positions are hedges. V-trade copies only
+the direction: spot BTC, its own position size and stops, no shorts, no leverage. None of this can
+be backtested, because past leader positions aren't available.
+
+**Fortrade (practice account).** Fortrade (pro.fortrade.com) has no public API. Its only automated
+route is MetaTrader 4, which would need a paid third-party bridge holding your login. So V-trade
+doesn't place orders there. Instead the dashboard shows every trade idea with the buy price, stop
+and target, next to a "Practice this on Fortrade" button, so you can place it on your Fortrade demo
+account by hand. V-trade's own paper trading already practices automatically.
 
 ## Configuration
 
@@ -180,6 +215,8 @@ vtrade/
   journal.py      SQLite journal
   services.py     fetch / train / backtest / live snapshot, shared by the CLI and the dashboard
   broker/         paper simulator and ccxt exchange broker
+  news.py         ForexFactory economic calendar and the news blackout
+  copytrade.py    top Hyperliquid traders, their positions and bias
   web/server.py   dashboard API (FastAPI), paper engine thread, background tasks
   web/static/     dashboard page (HTML, CSS, JS with Chart.js)
 tests/            pytest suite (no network needed)

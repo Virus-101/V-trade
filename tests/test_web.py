@@ -4,9 +4,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from vtrade import services
+from vtrade.copytrade import TopTraders
 from vtrade.data import synthetic_ohlcv
 from vtrade.features import build_features, build_labels
 from vtrade.model import train_final_model
+from vtrade.news import NewsCalendar
 from vtrade.web.server import create_app
 
 POST = {"X-VTrade": "1"}
@@ -32,8 +34,19 @@ def trained(cfg):
     return cfg
 
 
+NEWS = [{"title": "Non-Farm Employment Change", "country": "USD", "date": "2099-10-02T08:30:00-04:00",
+         "impact": "High", "forecast": "90K", "previous": "162K"}]
+LEADER = "0x" + "a" * 40
+LEADERBOARD = {"leaderboardRows": [{"ethAddress": LEADER, "accountValue": "5000000", "displayName": "whale",
+                                    "windowPerformances": [["month", {"pnl": "1000000", "roi": "0.2", "vlm": "5"}]]}]}
+LEADER_STATE = {"marginSummary": {"accountValue": "5000000"}, "assetPositions": [
+    {"position": {"coin": "BTC", "szi": "3", "positionValue": "250000", "entryPx": "80000", "leverage": {"value": 10}}}]}
+
+
 def client_for(cfg):
-    return TestClient(create_app(cfg, feed_factory=FakeFeed))
+    news = NewsCalendar(cfg, fetch=lambda url: NEWS)  # no network in tests
+    traders = TopTraders(cfg, get=lambda url: LEADERBOARD, post=lambda url, payload: LEADER_STATE)
+    return TestClient(create_app(cfg, feed_factory=FakeFeed, news=news, traders=traders))
 
 
 def test_index_and_overview_without_data(cfg):
@@ -100,3 +113,26 @@ def test_backtest_job_and_report(cfg, monkeypatch):
         report = c.get("/api/backtest").json()
         assert report["available"] and report["summary"]["metrics"]["trades"] == len(report["trades"])
         assert len(report["equity"]["t"]) == len(report["equity"]["bot"])
+
+
+def test_news_and_traders_endpoints(cfg):
+    with client_for(cfg) as c:
+        news = c.get("/api/news").json()
+        assert news["enabled"] and news["next"]["title"] == "Non-Farm Employment Change"
+        assert news["blackout"] is None and news["events"][0]["relevant"] is True
+        assert c.get("/api/overview").json()["news"]["next"]["currency"] == "USD"
+
+        t = c.get("/api/traders").json()
+        assert t["enabled"] and t["longs"] == 1 and t["bias"] == 1.0
+        assert t["traders"][0]["address"] == LEADER and t["traders"][0]["leverage"] == 10
+
+
+def test_paper_strategy_setting(trained):
+    with client_for(trained) as c:
+        assert c.get("/api/paper/settings").json()["copy_mode"] == "off"
+        assert c.post("/api/paper/settings", headers=POST, json={"copy_mode": "nonsense"}).status_code == 400
+        assert c.post("/api/paper/settings", headers=POST, json={"copy_mode": "follow"}).json()["copy_mode"] == "follow"
+        assert c.get("/api/overview").json()["paper"]["copy_mode"] == "follow"
+        c.post("/api/paper/start", headers=POST)
+        assert c.get("/api/overview").json()["paper"]["running_copy_mode"] == "follow"
+        c.post("/api/paper/stop", headers=POST)

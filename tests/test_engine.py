@@ -119,3 +119,95 @@ def test_llm_veto_blocks_entry(cfg, ohlcv):
     engine.step(_now_after_close(feed))
     assert analyst.calls == 1
     assert engine.state.position is None
+
+
+class FakeNews:
+    def __init__(self, event=None):
+        self.event = event
+
+    def blackout(self, now=None):
+        return self.event
+
+    def imminent(self, now=None):
+        return self.event
+
+    def upcoming(self, now=None, hours=24, relevant_only=True):
+        return []
+
+
+class FakeLeaders:
+    def __init__(self, bias):
+        self.bias = bias
+
+    def consensus(self, max_age=60):
+        return {"coin": "BTC", "bias": self.bias, "longs": 1, "shorts": 0, "flat": 0, "error": None}
+
+
+def _with(cfg, ohlcv, model, news=None, leaders=None):
+    engine, feed = _engine(cfg, ohlcv, model)
+    engine.news, engine.leaders = news, leaders
+    return engine, feed
+
+
+def _two_bars(engine, feed):
+    engine.step(_now_after_close(feed))  # startup bar: observe only
+    feed.advance()
+    engine.step(_now_after_close(feed))
+
+
+def test_news_blackout_blocks_entries(cfg, ohlcv):
+    from vtrade.news import NewsEvent
+
+    event = NewsEvent("CPI m/m", "USD", pd.Timestamp("2026-10-01 12:30", tz="UTC"), "High", "0.3%", "0.2%")
+    engine, feed = _with(cfg, ohlcv, FixedModel(0.9), news=FakeNews(event))
+    _two_bars(engine, feed)
+    assert engine.state.position is None
+    events = engine.journal.recent_events()
+    assert "news blackout" in events["detail"].iloc[0]
+
+
+def test_close_before_event_sells_open_position(cfg, ohlcv):
+    from vtrade.news import NewsEvent
+
+    engine, feed = _with(cfg, ohlcv, FixedModel(0.9), news=FakeNews(None))
+    _two_bars(engine, feed)
+    assert engine.state.position is not None
+    cfg.news.close_before_event = True
+    engine.news = FakeNews(NewsEvent("FOMC Statement", "USD", pd.Timestamp("2026-10-01 18:00", tz="UTC"), "High", "", ""))
+    engine.step(_now_after_close(feed))
+    assert engine.state.position is None
+    assert engine.journal.recent_fills()["reason"].iloc[0].startswith("news ahead")
+
+
+@pytest.mark.parametrize("bias, enters", [(-0.4, False), (None, False), (0.2, True)])
+def test_filter_mode_needs_leaders_net_long(cfg, ohlcv, bias, enters):
+    cfg.copy.mode = "filter"
+    engine, feed = _with(cfg, ohlcv, FixedModel(0.9), leaders=FakeLeaders(bias))
+    _two_bars(engine, feed)
+    assert (engine.state.position is not None) == enters
+
+
+def test_follow_mode_copies_leaders_regardless_of_model(cfg, ohlcv):
+    cfg.copy.mode = "follow"
+    leaders = FakeLeaders(0.6)
+    engine, feed = _with(cfg, ohlcv, FixedModel(0.1), leaders=leaders)  # model says no, leaders say long
+    _two_bars(engine, feed)
+    assert engine.state.position is not None
+    assert "copying leaders" in engine.journal.recent_fills()["reason"].iloc[0]
+
+    leaders.bias = -0.2
+    feed.advance()
+    engine.step(_now_after_close(feed))
+    assert engine.state.position is None
+
+
+def test_follow_mode_holds_when_leader_data_fails(cfg, ohlcv):
+    cfg.copy.mode = "follow"
+
+    class Broken:
+        def consensus(self, max_age=60):
+            raise TimeoutError("hyperliquid down")
+
+    engine, feed = _with(cfg, ohlcv, FixedModel(0.9), leaders=Broken())
+    _two_bars(engine, feed)
+    assert engine.state.position is None

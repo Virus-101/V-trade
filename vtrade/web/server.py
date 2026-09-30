@@ -7,6 +7,8 @@ local (blocks DNS-rebinding). Live trading is deliberately not exposed here: it 
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import os
 import threading
@@ -22,10 +24,14 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import pandas as pd
+
 from vtrade import __version__, services
 from vtrade.config import Config
+from vtrade.copytrade import TopTraders
 from vtrade.engine import EngineState, load_state, state_path
 from vtrade.journal import Journal
+from vtrade.news import NewsCalendar
 
 STATIC = Path(__file__).parent / "static"
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "testserver"}
@@ -107,9 +113,11 @@ class JobRunner:
 class PaperRunner:
     """The paper-trading engine, running in a background thread of the dashboard process."""
 
-    def __init__(self, cfg: Config, feed_factory: Callable[[], Any]):
+    def __init__(self, cfg: Config, feed_factory: Callable[[], Any], news=None, traders=None):
         self.cfg = cfg
         self.feed_factory = feed_factory
+        self.news, self.traders = news, traders
+        self.run_cfg = cfg  # the config of the current run (paper strategy override applied)
         self.thread: threading.Thread | None = None
         self.stop_event = threading.Event()
         self.started_at: str | None = None
@@ -125,6 +133,8 @@ class PaperRunner:
         if self.running:
             return
         model = SignalModel.load(self.cfg.model_path)  # fail fast (no model yet) in the request
+        self.run_cfg = copy.deepcopy(self.cfg)
+        self.run_cfg.copy.mode = paper_settings(self.cfg).get("copy_mode", self.cfg.copy.mode)
         self.stop_event = threading.Event()
         self.error = None
         self.started_at = _now()
@@ -136,10 +146,15 @@ class PaperRunner:
         from vtrade.engine import Engine
         from vtrade.llm import ClaudeAnalyst
 
-        journal = Journal(self.cfg.data_dir / "journal.db", "paper", self.cfg.symbol)
+        cfg = self.run_cfg
+        journal = Journal(cfg.data_dir / "journal.db", "paper", cfg.symbol)
         try:
-            analyst = ClaudeAnalyst(self.cfg.llm) if self.cfg.llm.enabled else None
-            engine = Engine(self.cfg, "paper", PaperBroker(self.cfg.costs), self.feed_factory(), model, journal, analyst)
+            analyst = ClaudeAnalyst(cfg.llm) if cfg.llm.enabled else None
+            news = self.news if cfg.news.enabled else None
+            leaders = self.traders if cfg.copy.enabled and cfg.copy.mode != "off" else None
+            log.info("Paper strategy: %s", COPY_MODES[cfg.copy.mode])
+            engine = Engine(cfg, "paper", PaperBroker(cfg.costs), self.feed_factory(), model, journal, analyst,
+                            news=news, leaders=leaders)
             engine.run(self.stop_event)
         except Exception as exc:
             log.exception("Paper engine crashed")
@@ -154,12 +169,19 @@ class PaperRunner:
         self.started_at = None
 
 
-def create_app(cfg: Config, feed_factory: Callable[[], Any] | None = None) -> FastAPI:
+def create_app(
+    cfg: Config,
+    feed_factory: Callable[[], Any] | None = None,
+    news: NewsCalendar | None = None,
+    traders: TopTraders | None = None,
+) -> FastAPI:
     from vtrade.data import MarketFeed
     from vtrade.model import SignalModel
 
     feed_factory = feed_factory or (lambda: MarketFeed(cfg))
-    paper = PaperRunner(cfg, feed_factory)
+    news = news or NewsCalendar(cfg)
+    traders = traders or TopTraders(cfg)
+    paper = PaperRunner(cfg, feed_factory, news, traders)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -233,7 +255,10 @@ def create_app(cfg: Config, feed_factory: Callable[[], Any] | None = None) -> Fa
             "data": services.data_info(cfg),
             "model": {"available": m is not None, **(m.meta if m else {})},
             "paper": {"running": paper.running, "started_at": paper.started_at, "error": paper.error,
-                      "state": _state_dict(state)},
+                      "state": _state_dict(state),
+                      "copy_mode": paper_settings(cfg).get("copy_mode", cfg.copy.mode),
+                      "running_copy_mode": paper.run_cfg.copy.mode if paper.running else None},
+            "news": _news_summary(cfg, news),
             "live": {"state": _state_dict(live_state)},
             "llm": {"enabled": cfg.llm.enabled, "model": cfg.llm.model, "key_set": bool(os.getenv("ANTHROPIC_API_KEY"))},
             "backtest": {"available": summary.exists(),
@@ -352,12 +377,83 @@ def create_app(cfg: Config, feed_factory: Callable[[], Any] | None = None) -> Fa
             log.info("Paper kill switch cleared")
         return {"ok": True}
 
+    @app.get("/api/paper/settings")
+    def get_paper_settings():
+        return {"copy_mode": paper_settings(cfg).get("copy_mode", cfg.copy.mode), "modes": COPY_MODES}
+
+    @app.post("/api/paper/settings")
+    def set_paper_settings(options: dict = Body(default={})):
+        mode = options.get("copy_mode")
+        if mode not in COPY_MODES:
+            raise HTTPException(400, f"copy_mode must be one of {list(COPY_MODES)}")
+        path = cfg.data_dir / "paper_settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**paper_settings(cfg), "copy_mode": mode}), encoding="utf-8")
+        log.info("Paper strategy set to: %s%s", COPY_MODES[mode], " (applies when paper trading restarts)" if paper.running else "")
+        return {"copy_mode": mode, "applies_on_restart": paper.running}
+
+    # ------------------------------------------------------------------ news (ForexFactory)
+    @app.get("/api/news")
+    def news_calendar(refresh: bool = False):
+        news.refresh(force=refresh)
+        now = pd.Timestamp.now(tz="UTC")
+        events = news.events()
+        return services.clean({
+            **_news_summary(cfg, news),
+            "status": news.status(),
+            "settings": cfg.to_dict()["news"],
+            "events": [{**e.to_dict(), "relevant": news.relevant(e)} for e in events],
+            "now": now.isoformat(),
+        })
+
+    # ------------------------------------------------------------------ top traders (Hyperliquid)
+    @app.get("/api/traders")
+    def top_traders(refresh: bool = False):
+        if not cfg.copy.enabled:
+            return {"enabled": False}
+        if refresh:
+            traders.refresh_leaderboard(force=True)
+        result = traders.consensus(max_age=0 if refresh else 60)
+        return services.clean({"enabled": True, **result, "settings": cfg.to_dict()["copy"],
+                               "paper_mode": paper_settings(cfg).get("copy_mode", cfg.copy.mode), "modes": COPY_MODES})
+
     # ------------------------------------------------------------------ logs
     @app.get("/api/logs")
     def logs(after: int = 0):
         return {"lines": logbuf.since(after)}
 
     return app
+
+
+COPY_MODES = {
+    "off": "ML model only",
+    "filter": "ML model, only when top traders are net long",
+    "follow": "Copy top traders",
+}
+
+
+def paper_settings(cfg: Config) -> dict[str, Any]:
+    path = cfg.data_dir / "paper_settings.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except ValueError:
+        return {}
+
+
+def _news_summary(cfg: Config, news: NewsCalendar) -> dict[str, Any]:
+    if not cfg.news.enabled:
+        return {"enabled": False}
+    try:
+        blackout = news.blackout()
+        upcoming = news.next_relevant()
+    except Exception as exc:  # never let the calendar break the overview
+        return {"enabled": True, "error": str(exc)}
+    return {
+        "enabled": True,
+        "blackout": blackout.to_dict() if blackout else None,
+        "next": upcoming.to_dict() if upcoming else None,
+        "error": news.error,
+    }
 
 
 def _mtime_iso(path: Path) -> str | None:

@@ -77,6 +77,32 @@ class EngineConfig:
 
 
 @dataclass
+class NewsConfig:
+    enabled: bool = True
+    currencies: list[str] = field(default_factory=lambda: ["USD"])
+    impacts: list[str] = field(default_factory=lambda: ["High"])
+    block_before_minutes: int = 30
+    block_after_minutes: int = 30
+    close_before_event: bool = False
+    refresh_minutes: int = 60
+
+
+@dataclass
+class CopyConfig:
+    enabled: bool = True
+    coin: str = "BTC"
+    leaders: list[str] = field(default_factory=list)
+    top_n: int = 10
+    rank_by: str = "month"
+    min_account_value: float = 1_000_000
+    mode: str = "off"
+    min_bias: float = 0.0
+    follow_entry_bias: float = 0.3
+    follow_exit_bias: float = 0.0
+    leaderboard_refresh_hours: int = 6
+
+
+@dataclass
 class Config:
     exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
     symbol: str = "BTC/USDT"
@@ -88,6 +114,8 @@ class Config:
     costs: CostConfig = field(default_factory=CostConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     engine: EngineConfig = field(default_factory=EngineConfig)
+    news: NewsConfig = field(default_factory=NewsConfig)
+    copy: CopyConfig = field(default_factory=CopyConfig)
 
     # Paths are not user-configurable in YAML; they are derived from the project root.
     data_dir: Path = ROOT / "data"
@@ -164,6 +192,21 @@ def validate(cfg: Config) -> None:
         problems.append("model: horizon and retrain_every must be >= 1")
     if cfg.llm.on_error not in ("veto", "allow"):
         problems.append("llm.on_error must be 'veto' or 'allow'")
+    if cfg.news.refresh_minutes < 5:
+        problems.append("news.refresh_minutes must be >= 5 (ForexFactory allows 2 downloads per 5 minutes)")
+    if cfg.news.block_before_minutes < 0 or cfg.news.block_after_minutes < 0:
+        problems.append("news: block windows can't be negative")
+    c = cfg.copy
+    if c.mode not in ("off", "filter", "follow"):
+        problems.append("copy.mode must be 'off', 'filter' or 'follow'")
+    if c.rank_by not in ("day", "week", "month", "allTime"):
+        problems.append("copy.rank_by must be day, week, month or allTime")
+    if not -1 <= c.follow_exit_bias < c.follow_entry_bias <= 1:
+        problems.append("copy: need -1 <= follow_exit_bias < follow_entry_bias <= 1")
+    if not -1 <= c.min_bias <= 1:
+        problems.append("copy.min_bias must be between -1 and 1")
+    if any(not (isinstance(a, str) and a.startswith("0x") and len(a) == 42) for a in c.leaders):
+        problems.append("copy.leaders must be 0x wallet addresses (42 characters)")
     if problems:
         raise ValueError("Invalid config:\n  " + "\n  ".join(problems))
 
